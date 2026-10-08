@@ -257,6 +257,21 @@ def test_module_global_rebinding_disables_constant():
     ) == (Status.CANDIDATE, None)
 
 
+def test_loop_else_runs_only_without_break():
+    assert verdict(
+        """
+        def f(items):
+            cmd = "ls"
+            for item in items:
+                if item:
+                    break
+            else:
+                cmd = "pwd"
+            os.system(cmd)
+        """
+    ) == (Status.SUPPRESSED, CONSTANT_INPUT)
+
+
 def test_dead_code_after_return_is_left_alone():
     assert verdict(
         """
@@ -476,6 +491,47 @@ NOT_SUPPRESSED_CASES = {
             box = Box(parts)
             box.items.append(input())
             os.system("".join(parts))
+        """,
+    "nested finally before outer handler": """
+        def f():
+            cmd = "echo safe"
+            try:
+                try:
+                    raise ValueError()
+                finally:
+                    cmd = input()
+            except ValueError:
+                os.system(cmd)
+        """,
+    "break skips the reset": """
+        def f():
+            cmd = "echo safe"
+            while True:
+                cmd = input()
+                if cmd:
+                    break
+                cmd = "echo safe"
+            os.system(cmd)
+        """,
+    "break from for loop": """
+        def f(items):
+            cmd = "echo safe"
+            for item in items:
+                cmd = input()
+                if item:
+                    break
+                cmd = "echo safe"
+            os.system(cmd)
+        """,
+    "continue skips the reset": """
+        def f(items):
+            cmd = "echo safe"
+            for item in items:
+                os.system(cmd)
+                cmd = input()
+                if item:
+                    continue
+                cmd = "echo safe"
         """,
     "walrus in the same condition as the sink": """
         def f():

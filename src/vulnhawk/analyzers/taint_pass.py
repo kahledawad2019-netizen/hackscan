@@ -382,6 +382,9 @@ class _FunctionEngine:
         # States at which an exception may be raised / control may leave a `try` early;
         # one collector per active `try` statement.
         self.try_states: list[list[Env]] = []
+        # States at `break` / `continue`, one collector per active loop.
+        self.break_states: list[list[Env]] = []
+        self.continue_states: list[list[Env]] = []
 
     # -- statements ------------------------------------------------------------------------
 
@@ -421,6 +424,14 @@ class _FunctionEngine:
             else:
                 self._assign(stmt.target, value, env, None)
         elif isinstance(stmt, (ast.Return, ast.Raise)):
+            return None
+        elif isinstance(stmt, ast.Break):
+            if self.break_states:
+                self.break_states[-1].append(dict(env))
+            return None  # statements after `break` do not run on this path
+        elif isinstance(stmt, ast.Continue):
+            if self.continue_states:
+                self.continue_states[-1].append(dict(env))
             return None
         elif isinstance(stmt, ast.If):
             then = self.exec_block(stmt.body, dict(env))
@@ -466,11 +477,20 @@ class _FunctionEngine:
     def _loop(self, stmt: ast.stmt, env: Env, target: ast.AST | None, iter_: ast.AST | None):
         entry = dict(env)
         current: Env = dict(env)
+        breaks: list[Env] = []
         for _ in range(MAX_LOOP_ITERATIONS):
             body_env = dict(current)
             if target is not None and iter_ is not None:
                 self._assign(target, self.eval(iter_, body_env), body_env, iter_)
-            out = self.exec_block(stmt.body, body_env)  # type: ignore[attr-defined]
+            self.break_states.append([])
+            self.continue_states.append([])
+            try:
+                out = self.exec_block(stmt.body, body_env)  # type: ignore[attr-defined]
+            finally:
+                breaks.extend(self.break_states.pop())
+                continues = self.continue_states.pop()
+            for state in continues:  # `continue` jumps back to the loop head
+                out = join_env(out, state)
             if isinstance(stmt, ast.While) and out is not None:
                 self._scan(stmt.test, out)  # condition re-evaluated each iteration
             merged = join_env(current, out)
@@ -479,8 +499,12 @@ class _FunctionEngine:
             current = merged or current
         else:  # no fixpoint within the budget: give up precision, stay sound
             current = {k: combine((v, UNKNOWN)) for k, v in current.items()}
-        exit_env = join_env(entry, current)
-        return self.exec_block(stmt.orelse, exit_env)  # type: ignore[attr-defined]
+        # Normal exit (condition false / iterator exhausted) runs `else`; `break` skips it.
+        normal_exit = join_env(entry, current)
+        out_env = self.exec_block(stmt.orelse, normal_exit)  # type: ignore[attr-defined]
+        for state in breaks:
+            out_env = join_env(out_env, state)
+        return out_env
 
     def _try(self, stmt: ast.stmt, env: Env) -> Env | None:
         # Handlers can be entered from any point in the body, so they see the join of
@@ -505,6 +529,10 @@ class _FunctionEngine:
         for state in leave_points:
             final_in = join_env(final_in, state)
         final = self.exec_block(stmt.finalbody, final_in or dict(env))  # type: ignore[attr-defined]
+        if self.try_states and final is not None:
+            # An exception propagating out of this try carries the post-`finally` state
+            # to the enclosing handler.
+            self.try_states[-1].append(dict(final))
         return final if outs is not None else None
 
     def _assign(self, target: ast.AST, value: Taint, env: Env, value_expr: ast.AST | None):

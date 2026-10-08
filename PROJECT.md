@@ -234,3 +234,11 @@ vulnhawk/
   the target platform is unknown, so POSIX-quoted commands are never suppressed; they stay
   candidates at confidence 20 with an explanatory note. (A `--shell posix` option to restore
   suppression can be added in M3 config.)
+- 2026-10-08 (Codex M2 round 3): `break`/`continue` modeled (paths end at the jump; break
+  states join the loop exit and skip `else`), inner `finally` state propagates to outer
+  handlers. Added `tests/test_taint_fuzz.py`: differential soundness fuzzing — random
+  programs (branches, while/for with break/continue, try/except/finally, raises, early
+  returns, list aliasing, dict wrappers, closures, walrus) are executed with an instrumented
+  `os.system`; any marker reaching a sink the scanner suppressed fails the test. It catches
+  every engine version before this one; a 4,500-program stress run checked 6,743 suppressed
+  sinks with zero unsound results. M2 closed on this evidence.
