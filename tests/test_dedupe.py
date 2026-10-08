@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+from dataclasses import replace
 
 from vulnhawk.core.dedupe import merge_findings
 from vulnhawk.core.fingerprint import assign_ids
@@ -29,7 +30,7 @@ def _cross_tool_sqli(make_finding):
             rule_id="bandit:B608",
             sources=("bandit",),
             cwe=(),
-            line=11,
+            line=10,
             severity=Severity.MEDIUM,
             confidence=40,
         ),
@@ -55,7 +56,7 @@ def test_merge_is_order_independent(make_finding):
         make_finding(rule_id="semgrep:no-cwe", sources=("semgrep",), cwe=(), line=10),
     ]
     outputs = {
-        tuple(f.to_dict()["id"] + repr(f.to_dict()) for f in assign_ids(merge_findings(p)))
+        tuple(f.canonical_json() for f in assign_ids(merge_findings(p)))
         for p in itertools.permutations(findings)
     }
     assert len(outputs) == 1
@@ -79,14 +80,60 @@ def test_unmapped_without_cwe_never_merges(make_finding):
     assert len(merge_findings(findings)) == 2
 
 
-def test_transitive_overlap_forms_one_cluster(make_finding):
+def test_broad_finding_does_not_fuse_distinct_sinks(make_finding):
     findings = [
-        make_finding(line=1, end_line=3),
-        make_finding(line=3, end_line=6, sources=("semgrep",), rule_id="semgrep:x"),
-        make_finding(line=6, end_line=8, sources=("bandit",), rule_id="bandit:B608"),
+        make_finding(line=10, snippet="cursor.execute(a)"),
+        make_finding(line=12, snippet="cursor.execute(b)"),
+        make_finding(line=10, end_line=12, sources=("semgrep",), rule_id="semgrep:x"),
+    ]
+    merged = merge_findings(findings)
+    assert len(merged) == 2
+    assert [m.sources for m in merged] == [("semgrep", "vulnhawk"), ("vulnhawk",)]
+
+
+def test_distinct_sinks_on_same_line_stay_separate(make_finding):
+    def at(col, end_col, **kw):
+        f = make_finding(line=10, **kw)
+        loc = replace(f.location, start_column=col, end_column=end_col)
+        return replace(f, location=loc)
+
+    findings = [at(1, 10), at(20, 30, rule_id="semgrep:x", sources=("semgrep",))]
+    assert len(merge_findings(findings)) == 2
+    # A whole-line report (no columns) overlaps both, but joins only one.
+    whole_line = make_finding(line=10, rule_id="bandit:B608", sources=("bandit",), cwe=())
+    assert len(merge_findings([*findings, whole_line])) == 2
+
+
+def test_merged_location_covers_all_contributors(make_finding):
+    findings = [
+        make_finding(line=12),
+        make_finding(line=10, end_line=12, sources=("semgrep",), rule_id="semgrep:x"),
     ]
     (merged,) = merge_findings(findings)
-    assert (merged.location.start_line, merged.location.end_line) == (1, 8)
+    assert merged.rule_id == "VH-SQLI-001"
+    assert (merged.location.start_line, merged.location.end_line) == (10, 12)
+
+
+def test_duplicate_evidence_is_kept(make_finding):
+    ev = (Evidence("semgrep", "tool_message", "same"),)
+    findings = [
+        make_finding(evidence=ev),
+        make_finding(rule_id="semgrep:x", sources=("semgrep",), evidence=ev),
+    ]
+    (merged,) = merge_findings(findings)
+    assert len(merged.evidence) == 2
+
+
+def test_tie_on_function_is_order_independent(make_finding):
+    findings = [
+        make_finding(rule_id="semgrep:x", sources=("semgrep",), function=None),
+        make_finding(rule_id="semgrep:x", sources=("semgrep",), function="get_user"),
+    ]
+    outputs = {
+        tuple(f.canonical_json() for f in assign_ids(merge_findings(p)))
+        for p in itertools.permutations(findings)
+    }
+    assert len(outputs) == 1
 
 
 def test_status_precedence(make_finding):

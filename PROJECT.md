@@ -36,7 +36,8 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 | `cwe` | list[str] | Used for dedupe and SARIF taxa |
 | `severity` | enum | critical/high/medium/low |
 | `location` | Region | rel path, start/end line+col (1-based lines, 1-based cols per SARIF) |
-| `snippet` | str | |
+| `snippet` | str | Display only; never used for identity |
+| `sink` | str | Source text of the sink at `location`, read from the file by the producer; input to the fingerprint (falls back to `snippet` only if empty) |
 | `sources` | list[str] | Provenance: `vulnhawk`, `semgrep`, `codeql`, `gitleaks`, ... |
 | `status` | enum | `candidate`, `confirmed`, `suppressed` |
 | `suppression` | Optional[str] | Reason: `taint:constant_input`, `taint:sanitized`, `llm:false_positive`, `inline:# vulnhawk: ignore` |
@@ -45,8 +46,13 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 | `fix` | Optional[Fix] | `edits: list[{region, replacement}]` + derived unified diff; only if validated |
 
 **Dedupe / merge policy** (deterministic, independent of importer order)
-- Merge key: (`vuln_class`, rel_path, overlapping region). Findings with missing CWE merge only if
+- Merge key: (`vuln_class`, rel_path, overlapping region — column-aware, `end_column` exclusive,
+  missing columns = whole line). Clustering is **anchor-based, not transitive**: findings are visited
+  own-engine first, then smallest region first, and each joins the first cluster whose anchor it
+  overlaps, so a broad report cannot fuse two distinct sinks. Findings with missing CWE merge only if
   `vuln_class` mapped via rule_id; otherwise they stay separate.
+- Merged location = union of all contributors' regions. Evidence = sorted concatenation (duplicates kept).
+- All tie-breaks fall back to the finding's canonical JSON, so every result is input-order independent.
 - Merged fields: `rule_id` = own-engine rule if present, else lexicographically smallest
   `tool:rule`; `severity` = max; `confidence` = max; `sources`/`related_rules`/`cwe` = sorted union;
   `evidence` = concatenation sorted by producer; `status` = `confirmed` > `candidate` > `suppressed`
@@ -187,3 +193,6 @@ vulnhawk/
   computed on merged findings). Identical sinks in one function get an occurrence suffix (`#n`,
   ordered by line), so inserting an identical sink earlier in the same function shifts later ids —
   accepted trade-off. Fingerprint ids prefixed `vh1-` (bump if the recipe changes).
+- 2026-10-08 (Codex M0 code review): anchor-based column-aware clustering (no transitive fusion),
+  `sink` field for fingerprints, union locations, evidence concatenation, canonical-JSON tie-breaks,
+  end-column validation.

@@ -6,6 +6,8 @@ findings; they return updated copies (see `dataclasses.replace`).
 
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -47,8 +49,8 @@ _STATUS_RANK = {Status.SUPPRESSED: 0, Status.CANDIDATE: 1, Status.CONFIRMED: 2}
 class Region:
     """Source location. Lines and columns are 1-based (SARIF convention).
 
-    `path` is a POSIX path relative to the scan root. `end_column` of None means
-    "to end of line".
+    `path` is a POSIX path relative to the scan root. `end_column` is exclusive (SARIF
+    `endColumn`); None means "to end of line".
     """
 
     path: str
@@ -66,13 +68,39 @@ class Region:
             object.__setattr__(self, "end_line", self.start_line)
         if self.end_line < self.start_line:
             raise ValueError(f"Region ends before it starts: {self}")
+        if self.end_column is not None and (
+            self.end_column < 1
+            or (self.end_line == self.start_line and self.end_column < self.start_column)
+        ):
+            raise ValueError(f"Region end column is invalid: {self}")
+
+    @property
+    def start_pos(self) -> tuple[int, float]:
+        return (self.start_line, self.start_column)
+
+    @property
+    def end_pos(self) -> tuple[int, float]:
+        """Exclusive end position; whole-line when `end_column` is None."""
+        if self.end_column is None:
+            return (self.end_line, math.inf)
+        # Zero-width regions still cover the character they point at.
+        if self.end_line == self.start_line and self.end_column == self.start_column:
+            return (self.end_line, self.end_column + 1)
+        return (self.end_line, self.end_column)
+
+    @property
+    def span(self) -> tuple[int, float]:
+        """Size used to prefer precise regions: (lines, columns)."""
+        lines = self.end_line - self.start_line
+        cols = self.end_pos[1] - self.start_column if lines == 0 else math.inf
+        return (lines, cols)
 
     def overlaps(self, other: Region) -> bool:
-        """Line-range overlap within the same file."""
+        """Position overlap (line and column aware) within the same file."""
         return (
             self.path == other.path
-            and self.start_line <= other.end_line
-            and other.start_line <= self.end_line
+            and self.start_pos < other.end_pos
+            and other.start_pos < self.end_pos
         )
 
     def sort_key(self) -> tuple[str, int, int]:
@@ -120,6 +148,10 @@ class Finding:
     evidence: tuple[Evidence, ...] = ()
     fix: Fix | None = None
     function: str | None = None  # enclosing function qualname, if known
+    # Source text of the sink expression at `location`, used for fingerprinting.
+    # Producers set it from the parsed file (own engine: the sink AST node; importers:
+    # the file text covered by the region), never from a tool-provided display snippet.
+    sink: str = ""
 
     def __post_init__(self) -> None:
         if not 0 <= self.confidence <= 100:
@@ -127,9 +159,13 @@ class Finding:
         if (self.status is Status.SUPPRESSED) != (self.suppression is not None):
             raise ValueError("suppression reason is required iff status is suppressed")
 
-    def sort_key(self) -> tuple[str, int, int, str, str]:
-        """Deterministic output ordering: path, line, column, rule, id."""
-        return (*self.location.sort_key(), self.rule_id, self.id)
+    def sort_key(self) -> tuple[str, int, int, str, str, str]:
+        """Deterministic output ordering: path, line, column, rule, id, then full content."""
+        return (*self.location.sort_key(), self.rule_id, self.id, self.canonical_json())
+
+    def canonical_json(self) -> str:
+        """Stable serialization; a total-order tie-breaker for equal-looking findings."""
+        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -147,6 +183,7 @@ class Finding:
             "message": self.message,
             "location": _region_to_dict(self.location),
             "function": self.function,
+            "sink": self.sink,
             "snippet": self.snippet,
             "evidence": [
                 {
@@ -189,6 +226,7 @@ class Finding:
             message=data["message"],
             location=Region(**data["location"]),
             function=data.get("function"),
+            sink=data.get("sink", ""),
             snippet=data.get("snippet", ""),
             evidence=tuple(
                 Evidence(

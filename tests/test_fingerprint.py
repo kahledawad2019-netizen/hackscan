@@ -44,3 +44,29 @@ def test_identical_sinks_get_distinct_ids_independent_of_order(make_finding):
     assert len(results) == 1
     (ids,) = results
     assert len(set(ids)) == 3
+
+
+def test_id_uses_sink_not_display_snippet(make_finding):
+    (a,) = assign_ids([make_finding(sink="cursor.execute(query)", snippet="cursor.execute(query)")])
+    (b,) = assign_ids(
+        [
+            make_finding(
+                sink="cursor.execute(query)",
+                snippet="query = build()\ncursor.execute(query)",
+                sources=("semgrep",),
+                rule_id="semgrep:x",
+            )
+        ]
+    )
+    assert a.id == b.id
+
+
+def test_same_location_ties_are_order_independent(make_finding):
+    findings = [
+        make_finding(rule_id="semgrep:r", sources=("semgrep",), cwe=(), message="first"),
+        make_finding(rule_id="semgrep:r", sources=("semgrep",), cwe=(), message="second"),
+    ]
+    results = {
+        tuple((f.message, f.id) for f in assign_ids(p)) for p in itertools.permutations(findings)
+    }
+    assert len(results) == 1

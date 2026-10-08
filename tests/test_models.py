@@ -30,6 +30,11 @@ def test_region_defaults_and_validation():
         Region(path="a\\b.py", start_line=1)
     with pytest.raises(ValueError):
         Region(path="a.py", start_line=5, end_line=4)
+    for bad_end in (0, -2):
+        with pytest.raises(ValueError):
+            Region(path="a.py", start_line=1, end_column=bad_end)
+    with pytest.raises(ValueError):
+        Region(path="a.py", start_line=1, start_column=10, end_column=5)
 
 
 def test_region_overlap():
@@ -37,6 +42,18 @@ def test_region_overlap():
     assert a.overlaps(Region(path="a.py", start_line=5, end_line=9))
     assert not a.overlaps(Region(path="a.py", start_line=6))
     assert not a.overlaps(Region(path="b.py", start_line=1))
+
+
+def test_region_overlap_is_column_aware():
+    left = Region(path="a.py", start_line=3, start_column=1, end_column=10)
+    right = Region(path="a.py", start_line=3, start_column=20, end_column=30)
+    whole = Region(path="a.py", start_line=3)
+    assert not left.overlaps(right)
+    assert left.overlaps(whole) and right.overlaps(whole)
+    # end_column is exclusive
+    assert not left.overlaps(Region(path="a.py", start_line=3, start_column=10, end_column=12))
+    # zero-width regions still cover their character
+    assert left.overlaps(Region(path="a.py", start_line=3, start_column=5, end_column=5))
 
 
 def test_suppression_reason_required_iff_suppressed(make_finding):

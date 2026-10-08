@@ -2,7 +2,9 @@
 
 id = H(vuln_class, path, enclosing function, normalized sink expression)
 
-Line numbers are deliberately excluded so ids survive unrelated edits that shift code.
+The sink expression comes from `Finding.sink` (text taken from the source file), falling
+back to `snippet` only when no sink was recorded. Line numbers are deliberately excluded
+so ids survive unrelated edits that shift code.
 Identical sinks in the same function are disambiguated by occurrence order.
 """
 
@@ -49,20 +51,24 @@ def assign_ids(findings: Iterable[Finding]) -> list[Finding]:
     """Return findings with `id` set. Input order does not affect the result."""
     groups: dict[str, list[Finding]] = defaultdict(list)
     for f in findings:
-        base = compute_fingerprint(f.vuln_class, f.location.path, f.function, f.snippet)
+        base = compute_fingerprint(f.vuln_class, f.location.path, f.function, _sink_text(f))
         groups[base].append(f)
 
     result: list[Finding] = []
     for base, members in groups.items():
-        members.sort(key=lambda f: (*f.location.sort_key(), f.rule_id, "|".join(f.sources)))
+        members.sort(key=lambda f: (*f.location.sort_key(), f.canonical_json()))
         for occurrence, f in enumerate(members):
             new_id = (
                 base
                 if occurrence == 0
                 else compute_fingerprint(
-                    f.vuln_class, f.location.path, f.function, f.snippet, occurrence
+                    f.vuln_class, f.location.path, f.function, _sink_text(f), occurrence
                 )
             )
             result.append(replace(f, id=new_id))
     result.sort(key=Finding.sort_key)
     return result
+
+
+def _sink_text(f: Finding) -> str:
+    return f.sink or f.snippet
