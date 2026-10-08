@@ -37,9 +37,14 @@ FORMAT_MODULES = (
     "django.db",
     # asyncpg uses $1-style placeholders: deliberately no template
 )
-# A placeholder is only valid where SQL expects a *value*.
+# A placeholder is only valid where SQL expects a *value* and binding keeps its meaning:
+# after a comparison, in a VALUES list, after LIMIT/OFFSET. Not inside function calls
+# (`typeof(?)` sees text where the inlined value was a number) nor after a bare comma
+# (`SELECT a, ?` selects a constant, not a column).
 _VALUE_POSITION_RE = re.compile(
-    r"(=|<|>|<=|>=|<>|!=|\(|,|\blike|\blimit|\boffset|\bvalues\s*\()\s*$", re.I
+    r"(=|<|>|<=|>=|<>|!=|\blike|\blimit|\boffset|\blimit\s+[^\s,()]+\s*,"
+    r"|\bvalues\s*\((?:[^()'\"]|'[^']*'|\"[^\"]*\")*)\s*$",
+    re.I,
 )
 # `IN (` expects a list: `IN ({ids})` with ids="1,2" means two values, `IN (?)` one.
 _IN_LIST_RE = re.compile(r"\bin\s*\([^)]*$", re.I)
@@ -105,7 +110,8 @@ def _sqli(call: ast.Call, ctx: FileContext):
     replacement = f"{receiver}({sql!r}, {args})"
     return (
         f"Pass values as query parameters ({placeholder!r} placeholders) instead of "
-        "formatting them into the SQL string.",
+        "formatting them into the SQL string. Review: bound values keep their Python "
+        "type (a str stays text where the database saw a number).",
         replacement,
         (),
     )

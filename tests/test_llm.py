@@ -315,9 +315,14 @@ def test_context_is_redacted(tmp_path):
 # -- LLM fixes ----------------------------------------------------------------------------
 
 
+GREP = (
+    "import os\nimport subprocess\n\ndef search(pattern):\n    os.system(f'grep -r {pattern} .')\n"
+)
+
+
 def test_valid_llm_fix_is_kept(tmp_path):
     fixed = "subprocess.run(['grep', '-r', pattern, '.'], check=False)"
-    code = "import os\nimport subprocess\n\ndef search(pattern):\n    os.system(f'grep -r {pattern} . | head')\n"
+    code = GREP
     report = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed)))
     (f,) = report.findings
     assert f.fix is not None and f.fix.producer == "llm"
@@ -400,12 +405,46 @@ def test_flagged_call_field_is_redacted(tmp_path):
         "subprocess.run(['grep', '-r', pattern, '.'], shell=True)",  # re-enables a shell
         "subprocess.run(['grep', '-r', '.'])",  # drops the user value
         "os.popen(pattern)",  # not a safe API
+        # Codex re-review: still a shell, another program, extra or reordered words
+        "subprocess.run(['sh', '-c', pattern])",
+        "subprocess.run(['/bin/bash', '-c', 'grep -r ' + pattern])",
+        "subprocess.run(['grep', '-r', pattern, '.'], executable='/bin/sh')",
+        "subprocess.run(['rm', '-r', pattern, '.'])",
+        "subprocess.run(['grep', '-r', pattern, '/'])",
+        "subprocess.run(['grep', '-r', '--include=*', pattern, '.'])",
+        "subprocess.run([*pattern.split()])",
     ],
 )
 def test_implausible_llm_fixes_are_rejected(tmp_path, fixed):
-    code = "import os\nimport subprocess\n\ndef search(pattern):\n    os.system(f'grep -r {pattern} . | head')\n"
+    (f,) = run(tmp_path, GREP, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert f.fix is None
+
+
+def test_llm_fix_must_keep_extra_shell_syntax(tmp_path):
+    # Dropping `| head` changes what runs; not offered as a fix.
+    code = GREP.replace("{pattern} .'", "{pattern} . | head'")
+    fixed = "subprocess.run(['grep', '-r', pattern, '.'])"
     (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
     assert f.fix is None
+
+
+SQL = "def get(cur, uid):\n    cur.execute(f\"SELECT name FROM users WHERE id = '{uid}'\")\n"
+
+
+@pytest.mark.parametrize(
+    ("fixed", "kept"),
+    [
+        ("cur.execute('SELECT name FROM users WHERE id = ?', (uid,))", True),
+        ("cur.execute('select name from users where id = %s', [uid])", True),
+        ("cur.execute('DELETE FROM users WHERE id = ?', (uid,))", False),
+        ("cur.execute('SELECT name FROM users WHERE id = ? OR 1=1', (uid,))", False),
+        ("cur.execute('SELECT password FROM users WHERE id = ?', (uid,))", False),
+        ("cur.execute('SELECT name FROM users WHERE id = ' + '?', (uid,))", False),
+    ],
+)
+def test_llm_sql_fix_must_keep_the_query(tmp_path, fixed, kept):
+    (f,) = run(tmp_path, SQL, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert (f.fix is not None) is kept
 
 
 @pytest.mark.parametrize(

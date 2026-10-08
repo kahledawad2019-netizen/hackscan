@@ -289,3 +289,36 @@ def test_multiline_call_fix(tmp_path: Path):
     _, new = fixed_source(tmp_path, code)
     compile(new, "m.py", "exec")
     assert "cur.execute('SELECT * FROM t WHERE id = ?', (uid,))" in new
+
+
+# -- Codex M4 re-review: placeholders only where binding keeps the meaning -------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    ['f"SELECT typeof({x})"', 'f"SELECT a, {x} FROM t"', 'f"SELECT * FROM t WHERE f({x}) = 1"'],
+)
+def test_no_placeholder_in_function_calls_or_select_lists(tmp_path: Path, query):
+    code = f"import sqlite3\ndef f(cur, x):\n    cur.execute({query})\n"
+    _, findings = fixes_for(tmp_path, code)
+    assert findings and all(f.fix is None for f in findings)
+
+
+def test_typeof_changes_meaning_when_bound():
+    db = sqlite3.connect(":memory:")
+    assert db.execute("SELECT typeof(" + "1" + ")").fetchone() == ("integer",)
+    assert db.execute("SELECT typeof(?)", ("1",)).fetchone() == ("text",)
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ('f"INSERT INTO t VALUES ({a}, {b})"', "'INSERT INTO t VALUES (?, ?)', (a, b)"),
+        ("f\"INSERT INTO t VALUES ('x,y', {b})\"", "\"INSERT INTO t VALUES ('x,y', ?)\", (b,)"),
+        ('f"SELECT * FROM t LIMIT {a}, {b}"', "'SELECT * FROM t LIMIT ?, ?', (a, b)"),
+    ],
+)
+def test_values_lists_and_limit_still_parameterized(tmp_path: Path, query, expected):
+    code = f"import sqlite3\ndef f(cur, a, b):\n    cur.execute({query})\n"
+    _, new = fixed_source(tmp_path, code)
+    assert expected in new

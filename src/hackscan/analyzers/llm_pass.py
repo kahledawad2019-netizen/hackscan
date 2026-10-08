@@ -623,12 +623,79 @@ def _plausible_rewrite(vuln_class: str, original: ast.Call, new: ast.Call, ctx) 
             and func.attr == original.func.attr
             and ast.dump(func.value) == ast.dump(original.func.value)
             and len(new.args) >= 2  # query plus parameters
+            and _same_sql(original, new)
         )
     allowed = SAFE_REWRITES.get(vuln_class)
     if not allowed:
         return False
     names = {n for n in _dotted(func)}
-    return bool(names & allowed)
+    if not names & allowed:
+        return False
+    return vuln_class != "cmdi" or _same_program(original, new)
+
+
+# A rewrite must not hand the value to another interpreter (`sh -c`, `python -c`...).
+SHELL_PROGRAMS = {
+    "sh", "bash", "dash", "zsh", "ksh", "csh", "tcsh", "fish", "busybox", "env", "xargs",
+    "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe", "wsl", "start",
+    "python", "python3", "py", "perl", "ruby", "node", "php", "lua", "osascript", "eval",
+}  # fmt: skip
+# Keywords that cannot change which program runs or what it receives as arguments.
+SAFE_SUBPROCESS_KEYWORDS = {
+    "check", "capture_output", "text", "timeout", "stdout", "stderr", "encoding", "errors",
+    "universal_newlines",
+}  # fmt: skip
+_SQL_PLACEHOLDER_RE = re.compile(r"%\(\w+\)s|%s|\?|:\w+|\$\d+")
+_SQL_TOKEN_RE = re.compile(r"[A-Za-z_]\w*|\d+(?:\.\d+)?|[^\s'\"]")
+
+
+def _literal_parts(expr: ast.AST) -> list[str | None] | None:
+    """Literal text (str) and interpolated values (None) of a string-building expression."""
+    from hackscan.analyzers.remediate import _sql_parts
+
+    parts = _sql_parts(expr)
+    if parts is None:
+        return None
+    return [p if isinstance(p, str) else None for p in parts]
+
+
+def _same_program(original: ast.Call, new: ast.Call) -> bool:
+    """The argv rewrite runs the original program with the original literal words, in
+    order, every other element being one of the original values; never a shell."""
+    if not original.args or not new.args or not isinstance(new.args[0], (ast.List, ast.Tuple)):
+        return False
+    if any(k.arg not in SAFE_SUBPROCESS_KEYWORDS for k in new.keywords) or len(new.args) != 1:
+        return False
+    parts = _literal_parts(original.args[0])
+    if parts is None:
+        return False
+    words = [w.strip("'\"") for p in parts if p is not None for w in p.split()]
+    words = [w for w in words if w]
+    argv = new.args[0].elts
+    literal = [e.value for e in argv if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+    if any(isinstance(e, ast.Starred) for e in argv):
+        return False
+    if not argv or not isinstance(argv[0], ast.Constant) or not literal or not words:
+        return False
+    program = literal[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return program not in SHELL_PROGRAMS and literal == words and argv[0].value == words[0]
+
+
+def _sql_tokens(text: str) -> list[str]:
+    return [t.lower() for t in _SQL_TOKEN_RE.findall(_SQL_PLACEHOLDER_RE.sub(" ", text))]
+
+
+def _same_sql(original: ast.Call, new: ast.Call) -> bool:
+    """The new query is one string literal with the original SQL text, values replaced by
+    placeholders: same statement, tables and conditions (no SELECT -> DELETE)."""
+    query = new.args[0]
+    if not (isinstance(query, ast.Constant) and isinstance(query.value, str)):
+        return False
+    parts = _literal_parts(original.args[0]) if original.args else None
+    if parts is None:
+        return False
+    before = " ".join(" " if p is None else p for p in parts)
+    return _sql_tokens(before) == _sql_tokens(query.value)
 
 
 def _dotted(expr: ast.AST) -> set[str]:
