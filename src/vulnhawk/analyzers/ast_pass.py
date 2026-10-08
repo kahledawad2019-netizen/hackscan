@@ -1,0 +1,126 @@
+"""Pass 1: run AST rule plugins over a file and emit candidate findings."""
+
+from __future__ import annotations
+
+import ast
+import warnings
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from vulnhawk.core.models import OWN_SOURCE, Evidence, Finding, Region
+from vulnhawk.core.taxonomy import classify
+from vulnhawk.plugins.base import FileContext, Match, RulePlugin
+
+PRODUCER = "ast"
+
+
+@dataclass
+class FileResult:
+    path: str
+    findings: list[Finding] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+def analyze_source(source: str, rel_path: str, plugins: Sequence[RulePlugin]) -> FileResult:
+    """Parse `source` and run every plugin. Parse and plugin errors are reported, not raised."""
+    result = FileResult(path=rel_path)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)  # e.g. invalid escapes in scanned code
+            tree = ast.parse(source, filename=rel_path, type_comments=False)
+    except (SyntaxError, ValueError) as exc:
+        result.errors.append(f"{rel_path}: cannot parse: {exc}")
+        return result
+
+    ctx = FileContext(path=rel_path, source=source, tree=tree)
+    by_type: dict[type[ast.AST], list[RulePlugin]] = {}
+    for plugin in plugins:
+        for node_type in plugin.node_types:
+            by_type.setdefault(node_type, []).append(plugin)
+
+    qualnames = _qualnames(tree)
+    for node in ast.walk(tree):
+        for plugin in by_type.get(type(node), ()):
+            try:
+                matches = list(plugin.check(node, ctx))
+            except Exception as exc:  # a broken rule must not abort the scan
+                line = getattr(node, "lineno", "?")
+                result.errors.append(f"{rel_path}:{line}: rule {plugin.rule_id} failed: {exc}")
+                continue
+            for match in matches:
+                result.findings.append(_to_finding(match, plugin, ctx, qualnames))
+    result.findings.sort(key=Finding.sort_key)
+    return result
+
+
+def analyze_file(path: Path, root: Path, plugins: Sequence[RulePlugin]) -> FileResult:
+    rel_path = path.relative_to(root).as_posix()
+    try:
+        source = path.read_bytes().decode("utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        return FileResult(path=rel_path, errors=[f"{rel_path}: cannot read: {exc}"])
+    return analyze_source(source, rel_path, plugins)
+
+
+def _to_finding(
+    match: Match, plugin: RulePlugin, ctx: FileContext, qualnames: dict[int, str]
+) -> Finding:
+    node = match.node
+    start_line = node.lineno
+    end_line = node.end_lineno or start_line
+    region = Region(
+        path=ctx.path,
+        start_line=start_line,
+        start_column=ctx.char_column(start_line, node.col_offset),
+        end_line=end_line,
+        end_column=(
+            ctx.char_column(end_line, node.end_col_offset)
+            if node.end_col_offset is not None
+            else None
+        ),
+    )
+    func = ctx.enclosing_function(node)
+    sink = ctx.segment(node)
+    return Finding(
+        id="",
+        vuln_class=classify(plugin.rule_id, plugin.cwe),
+        rule_id=plugin.rule_id,
+        severity=plugin.severity,
+        location=region,
+        message=match.message,
+        snippet=_line_snippet(ctx, start_line, end_line),
+        sink=sink,
+        function=qualnames.get(id(func)) if func is not None else None,
+        cwe=plugin.cwe,
+        sources=(OWN_SOURCE,),
+        confidence=match.confidence if match.confidence is not None else plugin.default_confidence,
+        evidence=(Evidence(PRODUCER, "rule_match", f"{plugin.name}: {match.message}"),),
+    )
+
+
+def _line_snippet(ctx: FileContext, start: int, end: int, max_lines: int = 5) -> str:
+    lines = ctx.lines[start - 1 : min(end, start + max_lines - 1)]
+    return "\n".join(lines)
+
+
+def _qualnames(tree: ast.Module) -> dict[int, str]:
+    """Map id(function node) -> dotted qualname (`Class.method`, `outer.<locals>.inner`)."""
+    names: dict[int, str] = {}
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                qual = f"{prefix}{child.name}"
+                names[id(child)] = qual
+                visit(child, f"{qual}.<locals>.")
+            elif isinstance(child, ast.ClassDef):
+                visit(child, f"{prefix}{child.name}.")
+            elif isinstance(child, ast.Lambda):
+                names[id(child)] = f"{prefix}<lambda>"
+                visit(child, prefix)
+            else:
+                visit(child, prefix)
+
+    visit(tree, "")
+    return names
