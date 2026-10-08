@@ -58,7 +58,11 @@ class ScopeIndex:
         self.module = Scope(tree, None)
         self._scope_of: dict[int, Scope] = {}
         self._walrus_targets: set[int] = set()
+        self._pending_nonlocal: list[tuple[Scope, str, str, str | None]] = []
         self._visit_body(self.module, tree.body)
+        # Enclosing bindings may appear after the nested def, so resolve owners last.
+        for scope, name, kind, target in self._pending_nonlocal:
+            self._nonlocal_owner(scope, name).bind(name, kind, target)
 
     # -- queries -------------------------------------------------------------------------
 
@@ -88,6 +92,8 @@ class ScopeIndex:
                 return self._resolve_in(self.module, name, star)
             if name in scope.nonlocals:
                 scope = scope.parent
+                while scope is not None and not scope.is_function:
+                    scope = scope.parent
                 continue
             if name in scope.bindings:
                 return self._resolve_in(scope, name, star)
@@ -98,7 +104,9 @@ class ScopeIndex:
         kinds = scope.bindings.get(name)
         if not kinds:
             return frozenset({name, *(f"{m}.{name}" for m in star)})
-        return frozenset(t for k, t in kinds if k == IMPORT and t)
+        imports = {t for k, t in kinds if k == IMPORT and t}
+        # A local binding may be conditional, so a star import can still supply the name.
+        return frozenset(imports | {f"{m}.{name}" for m in star})
 
     # -- construction ----------------------------------------------------------------------
 
@@ -203,23 +211,30 @@ class ScopeIndex:
         """Scope that actually receives a binding of `name` made in `scope`."""
         if name in scope.globals_:
             return self.module
-        if name in scope.nonlocals:
-            parent = scope.parent
-            fallback = None
-            while parent is not None:
-                if parent.is_function:
-                    if name in parent.bindings:
-                        return parent
-                    fallback = fallback or parent
-                parent = parent.parent
-            return fallback or scope
         return scope
 
+    def _nonlocal_owner(self, scope: Scope, name: str) -> Scope:
+        parent = scope.parent
+        fallback = None
+        while parent is not None:
+            if parent.is_function:
+                if name in parent.bindings and name not in parent.nonlocals:
+                    return parent
+                fallback = fallback or parent
+            parent = parent.parent
+        return fallback or scope
+
     def _bind_store(self, scope: Scope, name: str) -> None:
-        self._owner(scope, name).bind(name, LOCAL)
+        self._add(scope, name, LOCAL, None)
 
     def _bind_import(self, scope: Scope, name: str, target: str) -> None:
-        self._owner(scope, name).bind(name, IMPORT, target)
+        self._add(scope, name, IMPORT, target)
+
+    def _add(self, scope: Scope, name: str, kind: str, target: str | None) -> None:
+        if name in scope.nonlocals and name not in scope.globals_:
+            self._pending_nonlocal.append((scope, name, kind, target))
+        else:
+            self._owner(scope, name).bind(name, kind, target)
 
 
 def _same_scope_nodes(node: ast.AST) -> Iterator[ast.AST]:

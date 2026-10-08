@@ -93,7 +93,7 @@ def _is_db_receiver(func: ast.expr, ctx: FileContext) -> bool:
         return True
     # handle = sqlite3.connect(...); handle.execute(...)
     if isinstance(receiver, ast.Name) and any(
-        _chain_has_db_call(value, ctx) for value in ctx.assignments_before(receiver.id, func)
+        _chain_has_db_call(value, ctx) for value in ctx.binding_values(receiver.id, func)
     ):
         return True
     last = receiver

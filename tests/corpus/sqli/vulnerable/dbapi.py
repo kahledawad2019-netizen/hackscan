@@ -77,3 +77,10 @@ def connection_variable(path, query):
 
     handle = sqlite3.connect(path)
     handle.execute(query)  # expect: VH-SQLI-001
+
+
+MODULE_DB = sqlite3.connect("app.db")
+
+
+def module_level_handle(query):
+    MODULE_DB.execute(query)  # expect: VH-SQLI-001

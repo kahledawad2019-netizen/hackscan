@@ -269,3 +269,31 @@ def test_star_import_adds_possible_names():
     resolved = all_names(ctx)
     assert "os.system" in resolved["system(cmd)"]
     assert "eval" in resolved["eval(x)"]
+
+
+def test_star_import_survives_conditional_local_binding():
+    ctx = ctx_for(
+        """
+        from os import *
+        if safe:
+            system = safe_handler
+        system(command)
+        """
+    )
+    assert "os.system" in all_names(ctx)["system(command)"]
+
+
+def test_nonlocal_owner_bound_after_nested_def():
+    ctx = ctx_for(
+        """
+        def outer():
+            def middle():
+                def inner():
+                    nonlocal system
+                    system(cmd)
+                return inner
+            from os import system
+            return middle
+        """
+    )
+    assert calls(ctx)["system(cmd)"] == "os.system"

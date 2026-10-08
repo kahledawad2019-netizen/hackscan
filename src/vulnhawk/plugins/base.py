@@ -123,6 +123,20 @@ class FileContext:
                 values.append(stmt.value)
         return values
 
+    def binding_values(self, name: str, node: ast.AST) -> list[ast.expr]:
+        """Values assigned to `name` in the scope it is bound in, as seen from `node`:
+        local assignments before `node`, else all module-level assignments (module code
+        runs before the function is called). Flow-insensitive: for *finding* candidates.
+        """
+        local = self.assignments_before(name, node)
+        if local or self.enclosing_function(node) is None:
+            return local
+        values: list[ast.expr] = []
+        for stmt in _walk_same_scope(self.tree):
+            if isinstance(stmt, ast.Assign) and any(_binds(t, name) for t in stmt.targets):
+                values.append(stmt.value)
+        return values
+
     # -- source text -------------------------------------------------------------------
 
     def segment(self, node: ast.AST) -> str:
