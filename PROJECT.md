@@ -49,7 +49,11 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 - Merge key: (`vuln_class`, rel_path, overlapping region — column-aware, `end_column` exclusive,
   missing columns = whole line). Clustering is **not transitive** — invariant: every pair of findings
   in a cluster overlaps. Findings are visited smallest region first (own engine breaks ties) and join
-  the first cluster in which they overlap every member, so two disjoint sinks can never be fused. Findings with missing CWE merge only if
+  the first cluster in which they overlap every member, so two disjoint sinks can never be fused.
+  Findings sharing a source but recording different (normalized) sinks never merge — e.g. nested
+  `eval(eval(x))` — so a merge never reports fewer findings than any single source did.
+- `sink` and `function` are derived from the parsed file by every producer (importers look them up
+  by location); merged findings take them from the primary, else the first contributor that has them. Findings with missing CWE merge only if
   `vuln_class` mapped via rule_id; otherwise they stay separate.
 - Merged location = union of all contributors' regions. Evidence = sorted concatenation (duplicates kept).
 - All tie-breaks fall back to the finding's canonical JSON, so every result is input-order independent.

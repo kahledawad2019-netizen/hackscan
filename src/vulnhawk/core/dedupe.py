@@ -8,6 +8,10 @@ ties) and each joins the first cluster in which it overlaps *every* member; othe
 starts a new cluster. Two findings that do not overlap each other (distinct sinks) can
 therefore never be fused, whatever a third, broader report covers.
 
+Overlap alone is not identity: nested sinks such as `eval(eval(x))` overlap. Two findings
+that share a source but record different sinks are distinct reports from the same producer
+and never merge, so a merge never reports fewer findings than any single source did.
+
 A finding may join a cluster only when it shares `vuln_class` and path with its members,
 their regions overlap (column-aware), and both identities are grounded
 (see `taxonomy.is_mergeable_class`).
@@ -20,6 +24,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import replace
 
+from vulnhawk.core.fingerprint import normalize_expression, sink_text
 from vulnhawk.core.models import OWN_SOURCE, Finding, Region, Status
 from vulnhawk.core.taxonomy import is_mergeable_class, normalize_cwes
 
@@ -59,12 +64,20 @@ def _anchor_clusters(members: list[Finding]) -> list[list[Finding]]:
     clusters: list[list[Finding]] = []
     for f in sorted(members, key=_precision_key):
         for cluster in clusters:
-            if all(m.location.overlaps(f.location) for m in cluster):
+            if all(_compatible(m, f) for m in cluster):
                 cluster.append(f)
                 break
         else:
             clusters.append([f])
     return clusters
+
+
+def _compatible(a: Finding, b: Finding) -> bool:
+    if not a.location.overlaps(b.location):
+        return False
+    if set(a.sources) & set(b.sources):
+        return normalize_expression(sink_text(a)) == normalize_expression(sink_text(b))
+    return True
 
 
 def _primary(cluster: list[Finding]) -> Finding:
@@ -92,6 +105,9 @@ def _merge_cluster(cluster: list[Finding]) -> Finding:
     )
     fix = primary.fix or next((f.fix for f in ordered if f.fix is not None), None)
     sink = primary.sink or next((f.sink for f in _by_precedence(cluster) if f.sink), "")
+    function = primary.function or next(
+        (f.function for f in _by_precedence(cluster) if f.function), None
+    )
 
     return replace(
         primary,
@@ -106,6 +122,7 @@ def _merge_cluster(cluster: list[Finding]) -> Finding:
         evidence=tuple(evidence),
         fix=fix,
         sink=sink,
+        function=function,
     )
 
 

@@ -148,7 +148,9 @@ class Finding:
     confidence: int = 50
     evidence: tuple[Evidence, ...] = ()
     fix: Fix | None = None
-    function: str | None = None  # enclosing function qualname, if known
+    # Enclosing function qualname. Like `sink`, producers derive it from the parsed file
+    # (importers look it up by location), so it does not depend on which tool reported.
+    function: str | None = None
     # Source text of the sink expression at `location`, used for fingerprinting.
     # Producers set it from the parsed file (own engine: the sink AST node; importers:
     # the file text covered by the region), never from a tool-provided display snippet.

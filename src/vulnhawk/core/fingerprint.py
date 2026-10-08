@@ -51,7 +51,7 @@ def assign_ids(findings: Iterable[Finding]) -> list[Finding]:
     """Return findings with `id` set. Input order does not affect the result."""
     groups: dict[str, list[Finding]] = defaultdict(list)
     for f in findings:
-        base = compute_fingerprint(f.vuln_class, f.location.path, f.function, _sink_text(f))
+        base = compute_fingerprint(f.vuln_class, f.location.path, f.function, sink_text(f))
         groups[base].append(f)
 
     result: list[Finding] = []
@@ -62,7 +62,7 @@ def assign_ids(findings: Iterable[Finding]) -> list[Finding]:
                 base
                 if occurrence == 0
                 else compute_fingerprint(
-                    f.vuln_class, f.location.path, f.function, _sink_text(f), occurrence
+                    f.vuln_class, f.location.path, f.function, sink_text(f), occurrence
                 )
             )
             result.append(replace(f, id=new_id))
@@ -70,5 +70,5 @@ def assign_ids(findings: Iterable[Finding]) -> list[Finding]:
     return result
 
 
-def _sink_text(f: Finding) -> str:
+def sink_text(f: Finding) -> str:
     return f.sink or f.snippet

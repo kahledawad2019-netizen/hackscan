@@ -267,3 +267,34 @@ def test_short_bridge_region_does_not_fuse_distinct_sinks(make_finding):
     b = _cols(make_finding(rule_id="semgrep:x", sources=("semgrep",)), 12, 22)
     bridge = _cols(make_finding(rule_id="bandit:B608", sources=("bandit",)), 8, 14)
     assert len(merge_findings([a, b, bridge])) == 2
+
+
+def test_nested_sinks_from_same_source_stay_separate(make_finding):
+    """eval(eval(x)): inner and outer calls overlap but are two findings."""
+    outer = _cols(make_finding(rule_id="VH-CODEI-001", cwe=(), sink="eval(eval(x))"), 5, 18)
+    inner = _cols(make_finding(rule_id="VH-CODEI-001", cwe=(), sink="eval(x)"), 10, 17)
+    assert len(merge_findings([outer, inner])) == 2
+    # A different tool reporting the outer call still merges with one of them.
+    tool = _cols(
+        make_finding(rule_id="bandit:B307", sources=("bandit",), cwe=(), sink="eval(eval(x))"),
+        5,
+        18,
+    )
+    assert len(merge_findings([outer, inner, tool])) == 2
+
+
+def test_same_source_same_sink_still_merges(make_finding):
+    a = make_finding(sink="cursor.execute(q)")
+    b = make_finding(sink="cursor.execute( q )", rule_id="VH-SQLI-002")
+    assert len(merge_findings([a, b])) == 1
+
+
+def test_merged_id_does_not_depend_on_which_report_has_function(make_finding):
+    with_fn = make_finding(
+        rule_id="semgrep:x", sources=("semgrep",), sink="q()", function="get_user"
+    )
+    without = make_finding(rule_id="bandit:B608", sources=("bandit",), sink="q()", function=None)
+    (alone,) = assign_ids(merge_findings([with_fn]))
+    (both,) = assign_ids(merge_findings([with_fn, without]))
+    assert both.function == "get_user"
+    assert alone.id == both.id
