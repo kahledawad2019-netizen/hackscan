@@ -79,8 +79,8 @@ def export_sarif(
                 "columnKind": "unicodeCodePoints",
                 "invocations": [
                     {
-                        # False when some files could not be analyzed: results are
-                        # incomplete (errors are listed as notifications).
+                        # False when files or requested reports could not be analyzed:
+                        # results are incomplete (errors are listed as notifications).
                         "executionSuccessful": not result.errors,
                         "toolExecutionNotifications": notifications,
                     }

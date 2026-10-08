@@ -50,14 +50,16 @@ hackscan rules                                    # list rules
 | `--fail-on SEV` | Exit 1 if an open (candidate/confirmed) finding is at least `SEV`. Suppressed findings never count. |
 | `--ignore GLOB` | Skip paths (`tests/*`, `**/migrations/**`, `legacy`). `.venv`, `node_modules`, `build`, ... are always skipped. |
 | `--with TOOLS` / `--import FMT=FILE` | Run external tools / import reports (`sarif`, `semgrep`, `bandit`, `codeql`, `gitleaks`). A missing or failing tool is a warning unless `--strict-tools`. |
+| `-o FILE` | Write the report to `FILE`. Never overwrites anything except a previous HackScan report. |
 | `--plugins DIR` | Load custom rules (see below). |
 | `--allow-incomplete` | Do not exit 2 when some files cannot be analyzed (they are still listed). |
 | `--no-taint` | Pattern matching only. |
 | `--jobs N` | Worker processes (default: automatic). |
 
 Exit codes: `0` OK, `1` `--fail-on` threshold reached, `2` usage/config/plugin error or
-an **incomplete scan** (a file could not be parsed or read; use `--allow-incomplete` to
-accept). An incomplete scan is never reported as a pass, and SARIF marks it with
+an **incomplete scan** (a file could not be parsed or read, or an `--import` report
+could not be loaded; use `--allow-incomplete` to accept). A `--with` tool that is missing
+or exits with an error is a warning, or exit `2` with `--strict-tools`. An incomplete scan is never reported as a pass, and SARIF marks it with
 `executionSuccessful: false`.
 
 ### Configuration
@@ -82,7 +84,12 @@ plugins: security/rules
 os.system(cmd)  # hackscan: ignore[HS-CMDI-001]
 ```
 
-Suppressed findings stay in SARIF output (as `suppressions`) so they remain auditable.
+Suppressed findings stay in SARIF output (as `suppressions`) so they remain auditable;
+use `--sarif-omit-suppressed` when uploading to GitHub, which does not honor them.
+
+Secrets are never echoed: findings of class `secret` (from any tool) have generic
+messages and redacted snippets, and values reported by Gitleaks are scrubbed from all
+output, including warnings.
 
 ## Rules
 

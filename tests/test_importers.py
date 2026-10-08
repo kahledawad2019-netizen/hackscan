@@ -132,7 +132,7 @@ def test_byo_import_failure_is_reported(tmp_path: Path):
     bad.write_text("{")
     results = collect(PROJECT, PROJECT, (), (("codeql", bad),), timeout=5)
     assert results.runs[0].status == "failed"
-    assert results.warnings
+    assert results.errors  # an explicitly requested report: the scan is incomplete
 
 
 def test_cross_tool_dedupe_in_full_scan():
@@ -271,3 +271,109 @@ def test_malformed_gitleaks_entry_is_skipped():
     result = import_gitleaks(items, PROJECT, SourceIndex(PROJECT))
     assert len(result.findings) == 1
     assert any("malformed" in w for w in result.warnings)
+
+
+def test_unquoted_secret_from_other_tool_is_redacted(tmp_path):
+    from hackscan.plugins.loader import builtin_plugins
+    from hackscan.sarif.generator import export_sarif
+
+    (tmp_path / "settings.py").write_text("DB_PASSWORD = hunter2hunter2  # set in prod\n")
+    report = tmp_path / "r.sarif"
+    report.write_text(
+        json.dumps(
+            {
+                "runs": [
+                    {
+                        "tool": {
+                            "driver": {
+                                "name": "CodeQL",
+                                "rules": [
+                                    {
+                                        "id": "py/hardcoded-credentials",
+                                        "properties": {"tags": ["external/cwe/cwe-798"]},
+                                    }
+                                ],
+                            }
+                        },
+                        "results": [
+                            {
+                                "ruleId": "py/hardcoded-credentials",
+                                "message": {
+                                    "text": "Hard-coded credential hunter2hunter2 used here"
+                                },
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": "settings.py"},
+                                            "region": {"startLine": 1},
+                                        }
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    result = scan(tmp_path, HackScanConfig(imports=(("codeql", report),)))
+    (f,) = result.findings
+    assert f.vuln_class == "secret"
+    dumped = json.dumps([f.to_dict()]) + json.dumps(export_sarif(result, builtin_plugins()))
+    assert "hunter2hunter2" not in dumped
+
+
+def test_known_secret_redacted_from_warnings(tmp_path):
+    secret = "s3cr3t-value-in-path"
+    report = tmp_path / "g.json"
+    report.write_text(
+        json.dumps(
+            [
+                {
+                    "File": f"/elsewhere/{secret}/x.py",
+                    "StartLine": 1,
+                    "Secret": secret,
+                    "RuleID": "generic",
+                }
+            ]
+        )
+    )
+    (tmp_path / "a.py").write_text("x = 1\n")
+    result = scan(tmp_path, HackScanConfig(imports=(("gitleaks", report),)))
+    assert result.warnings
+    assert secret not in " ".join(result.warnings + result.errors)
+
+
+def test_tool_error_exit_code_is_partial(monkeypatch, tmp_path):
+    import subprocess
+
+    from hackscan.importers import runner
+
+    monkeypatch.setattr(shutil, "which", lambda name: name)
+
+    def fake_run(command, **kwargs):
+        out = Path(command[command.index("--output") + 1])
+        out.write_text((FIXTURES / "semgrep.sarif").read_text(encoding="utf-8"))
+        return subprocess.CompletedProcess(command, 2, "", "semgrep: fatal error")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    results = collect(PROJECT, PROJECT, ("semgrep",), (), timeout=5)
+    assert results.runs[0].status == "partial"
+    assert results.findings  # what it did find is kept
+    assert any("error code 2" in w for w in results.warnings)
+
+
+def test_gitleaks_secrets_in_one_file_keep_distinct_ids(tmp_path):
+    (tmp_path / "a.py").write_text("A = 'one-secret-value'\nB = 'two-secret-value'\n")
+    report = tmp_path / "g.json"
+    report.write_text(
+        json.dumps(
+            [
+                {"File": "a.py", "StartLine": 1, "Secret": "one-secret-value", "RuleID": "generic"},
+                {"File": "a.py", "StartLine": 2, "Secret": "two-secret-value", "RuleID": "generic"},
+            ]
+        )
+    )
+    result = scan(tmp_path, HackScanConfig(imports=(("gitleaks", report),)))
+    assert len({f.id for f in result.findings}) == 2
+    assert all("@L" in f.sink for f in result.findings)

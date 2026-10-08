@@ -265,3 +265,8 @@ hackscan/
   resolves them that way) and URI-escaped; `--sarif-omit-suppressed` for GitHub uploads,
   since GitHub does not document `suppressions` support and only reads
   `primaryLocationLineHash` (computed by `upload-sarif`).
+- 2026-10-08 (Codex final release check): secret-class findings never carry tool text
+  (generic message/evidence; literals and assigned values redacted in snippet/sink);
+  known secrets scrubbed from warnings/errors; `-o` only overwrites previous HackScan
+  reports; failed `--import` reports make the scan incomplete (exit 2); `--with` tools
+  exiting with an error code are `partial` (warning, fails `--strict-tools`).

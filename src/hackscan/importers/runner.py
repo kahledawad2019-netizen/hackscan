@@ -21,7 +21,7 @@ from hackscan.importers.sarif import import_sarif, load_sarif
 @dataclass
 class ToolRun:
     tool: str
-    status: str  # "ok", "missing", "failed", "timeout", "imported"
+    status: str  # "ok", "partial", "missing", "failed", "timeout", "imported"
     detail: str = ""
     findings: int = 0
 
@@ -30,6 +30,8 @@ class ToolRun:
 class ExternalResults:
     findings: list = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Requested reports that could not be imported: the scan is incomplete.
+    errors: list[str] = field(default_factory=list)
     runs: list[ToolRun] = field(default_factory=list)
     secrets: set[str] = field(default_factory=set)
 
@@ -39,6 +41,10 @@ class ExternalResults:
         self.secrets |= result.secrets
         run.findings = len(result.findings)
         self.runs.append(run)
+
+
+# Exit codes meaning "ran to completion" (1 = findings reported for semgrep/bandit).
+OK_EXIT_CODES = {"semgrep": {0, 1}, "bandit": {0, 1}, "gitleaks": {0}}
 
 
 def _commands(tool: str, target: Path, out: Path) -> list[str]:
@@ -93,7 +99,7 @@ def collect(
         try:
             result = _load(fmt, report, root, index)
         except ReportError as exc:
-            results.warnings.append(str(exc))
+            results.errors.append(f"import {fmt}={report}: {exc}")
             results.runs.append(ToolRun(fmt, "failed", str(exc)))
             continue
         results.add(result, ToolRun(result.tool, "imported", str(report)))
@@ -143,5 +149,13 @@ def _run_tool(
         except ReportError as exc:
             results.warnings.append(f"{tool}: unusable output: {exc}")
             results.runs.append(ToolRun(tool, "failed", "unusable output"))
+            return
+        if proc.returncode not in OK_EXIT_CODES[tool]:
+            # The tool reported an error but left output: keep what it found, flag the
+            # run so it is visible and `--strict-tools` fails.
+            results.warnings.append(
+                f"{tool}: exited with error code {proc.returncode}; results may be incomplete"
+            )
+            results.add(result, ToolRun(tool, "partial", f"exit {proc.returncode}"))
             return
         results.add(result, ToolRun(tool, "ok", f"exit {proc.returncode}"))

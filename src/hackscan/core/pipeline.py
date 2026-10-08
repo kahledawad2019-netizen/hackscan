@@ -19,7 +19,7 @@ from hackscan.config import DEFAULT_IGNORES, HackScanConfig
 from hackscan.core.dedupe import merge_findings
 from hackscan.core.fingerprint import assign_ids
 from hackscan.core.models import Finding
-from hackscan.core.redact import redact_findings
+from hackscan.core.redact import redact_findings, redact_messages
 from hackscan.importers.common import SourceIndex
 from hackscan.importers.runner import ToolRun, collect
 from hackscan.plugins.base import RulePlugin
@@ -72,8 +72,8 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
         findings=final,
         files_scanned=len(files),
         duration_seconds=time.perf_counter() - started,
-        errors=sorted(errors),
-        warnings=external.warnings,
+        errors=redact_messages([*sorted(errors), *external.errors], external.secrets),
+        warnings=redact_messages(external.warnings, external.secrets),
         tool_runs=external.runs,
     )
 

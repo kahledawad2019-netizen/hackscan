@@ -233,3 +233,32 @@ def test_config_rejects_field_style_keys(tmp_path: Path):
     (tmp_path / ".hackscan.yml").write_text("with-tools: [gitleaks]\n")
     result = run("scan", str(tmp_path))
     assert result.exit_code == 2 and "unknown option" in result.output
+
+
+def test_failed_import_makes_scan_incomplete(tmp_path: Path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    bad = tmp_path / "notes.md"
+    bad.write_text("# not sarif\n")
+    result = run("scan", str(tmp_path), "--import", f"sarif={bad}")
+    assert result.exit_code == 2
+    assert "INCOMPLETE" in result.output
+    assert (
+        run("scan", str(tmp_path), "--import", f"sarif={bad}", "--allow-incomplete").exit_code == 0
+    )
+
+
+@pytest.mark.parametrize("name", ["pyproject.toml", "release.yml", "notes.json"])
+def test_output_never_overwrites_non_report_files(tmp_path: Path, name: str):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    victim = tmp_path / name
+    victim.write_text("[project]\nname = 'keep me'\n")
+    assert run("scan", str(tmp_path), "--format", "json", "-o", str(victim)).exit_code == 2
+    assert "keep me" in victim.read_text()
+
+
+@pytest.mark.parametrize("fmt", ["text", "json", "sarif"])
+def test_output_may_overwrite_previous_report(tmp_path: Path, fmt: str):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    out = tmp_path / f"report.{fmt}"
+    assert run("scan", str(tmp_path), "--format", fmt, "-o", str(out)).exit_code == 0
+    assert run("scan", str(tmp_path), "--format", fmt, "-o", str(out)).exit_code == 0

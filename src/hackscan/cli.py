@@ -23,7 +23,8 @@ from hackscan.plugins.loader import PluginError, resolve_plugins
 
 EXIT_OK, EXIT_FINDINGS, EXIT_ERROR = 0, 1, 2
 SEVERITIES = [s.value for s in Severity]
-TOOL_FAILURES = {"missing", "failed", "timeout"}
+TOOL_FAILURES = {"missing", "failed", "timeout", "partial"}
+REPORT_SIGNATURES = ('"name": "HackScan"', '"name": "hackscan"', "HackScan ")
 
 
 @click.group()
@@ -147,8 +148,8 @@ def scan_command(
 
     if result.errors and not config.allow_incomplete:
         click.echo(
-            f"hackscan: error: scan incomplete, {len(result.errors)} file(s) could not be "
-            "analyzed (see errors above; --allow-incomplete to accept)",
+            f"hackscan: error: scan incomplete, {len(result.errors)} file(s) or report(s) "
+            "could not be analyzed (see errors above; --allow-incomplete to accept)",
             err=True,
         )
         sys.exit(EXIT_ERROR)
@@ -178,12 +179,32 @@ def rules_command(plugins: Path | None) -> None:
 
 
 def _check_output(output: Path, target: Path) -> None:
-    """Refuse to overwrite source code: a report must never clobber what it scans."""
+    """A report never overwrites anything but a previous HackScan report.
+
+    New files are fine unless they would be Python source; an existing file is only
+    replaced if it already is a HackScan report (text, JSON or SARIF), so `-o
+    pyproject.toml` or `-o app.py` cannot destroy project files.
+    """
     resolved = output.resolve()
-    target = target.resolve()
-    if resolved.suffix in {".py", ".pyw", ".pyi"} or resolved == target:
-        click.echo(f"hackscan: error: refusing to write the report to {output}", err=True)
+    refuse = resolved.suffix in {".py", ".pyw", ".pyi"} or resolved == target.resolve()
+    if not refuse and resolved.exists():
+        refuse = resolved.is_dir() or not _is_hackscan_report(resolved)
+    if refuse:
+        click.echo(
+            f"hackscan: error: refusing to write the report to {output} "
+            "(existing file is not a HackScan report)",
+            err=True,
+        )
         sys.exit(EXIT_ERROR)
+
+
+def _is_hackscan_report(path: Path) -> bool:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(4096)
+    except OSError:
+        return False
+    return head.startswith("HackScan ") or any(sig in head for sig in REPORT_SIGNATURES[:2])
 
 
 def _parse_imports(values: tuple[str, ...]) -> tuple[tuple[str, Path], ...]:

@@ -84,8 +84,9 @@ def _convert(item: dict[str, Any], root: Path, index: SourceIndex, result: Impor
             location=region,
             message=description,
             snippet=snippet,
-            # A secret's identity is its location and rule, never its value.
-            sink=f"{rule}@{rel}:{region.start_line}",
+            # A secret's identity is its location and rule, never its value. No `=`/`:` so
+            # secret-class redaction leaves it intact (it feeds the fingerprint).
+            sink=f"{rule}@{rel}@L{region.start_line}",
             function=None,
             cwe=("CWE-798",),
             sources=(SOURCE,),
