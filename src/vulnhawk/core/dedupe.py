@@ -3,8 +3,9 @@
 Pipeline order: collect (own engine + importers) -> `merge_findings` -> `assign_ids`.
 
 Clustering is anchor-based, not transitive: findings are visited from most to least
-precise (smallest region first), and each joins the first cluster whose *anchor* (the
-cluster's first, most precise member) it overlaps. A broad finding spanning two distinct
+precise (smallest region first, regardless of source), and each joins the first cluster
+whose *anchor* (the cluster's first, most precise member) it overlaps. A broad finding
+spanning two distinct
 sinks therefore joins one of them instead of fusing them together.
 
 A finding may join a cluster only when it shares `vuln_class` and path with the anchor,
@@ -14,6 +15,7 @@ their regions overlap (column-aware), and both identities are grounded
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import replace
@@ -41,11 +43,14 @@ def merge_findings(findings: Iterable[Finding]) -> list[Finding]:
 
 
 def _precision_key(f: Finding) -> tuple:
-    """Total order: own engine first, then most precise region, then full content."""
+    """Total order: most precise region first; own engine breaks ties, then full content.
+
+    Precision must come first: a broad anchor would absorb separate sinks it spans.
+    """
     return (
-        OWN_SOURCE not in f.sources,
         f.location.span,
         f.location.start_pos,
+        OWN_SOURCE not in f.sources,
         f.canonical_json(),
     )
 
@@ -86,6 +91,7 @@ def _merge_cluster(cluster: list[Finding]) -> Finding:
         key=lambda e: (e.producer, e.kind, e.message, e.region.sort_key() if e.region else ()),
     )
     fix = primary.fix or next((f.fix for f in ordered if f.fix is not None), None)
+    sink = primary.sink or next((f.sink for f in _by_precedence(cluster) if f.sink), "")
 
     return replace(
         primary,
@@ -99,18 +105,26 @@ def _merge_cluster(cluster: list[Finding]) -> Finding:
         cwe=normalize_cwes(c for f in cluster for c in f.cwe),
         evidence=tuple(evidence),
         fix=fix,
+        sink=sink,
+    )
+
+
+def _by_precedence(cluster: list[Finding]) -> list[Finding]:
+    """Own-engine contributors first, then by rule id and content."""
+    return sorted(
+        cluster, key=lambda f: (OWN_SOURCE not in f.sources, f.rule_id, f.canonical_json())
     )
 
 
 def _union(regions: Iterable[Region]) -> Region:
-    """Smallest region covering every contributor."""
+    """Smallest region covering every contributor (using effective, exclusive ends)."""
     regions = list(regions)
-    first = min(regions, key=lambda r: r.start_pos)
-    last = max(regions, key=lambda r: r.end_pos)
+    start_line, start_column = min(r.start_pos for r in regions)
+    end_line, end_column = max(r.end_pos for r in regions)
     return Region(
-        path=first.path,
-        start_line=first.start_line,
-        start_column=first.start_column,
-        end_line=last.end_line,
-        end_column=last.end_column,
+        path=regions[0].path,
+        start_line=start_line,
+        start_column=int(start_column),
+        end_line=end_line,
+        end_column=None if end_column == math.inf else int(end_column),
     )

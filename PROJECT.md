@@ -48,7 +48,7 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 **Dedupe / merge policy** (deterministic, independent of importer order)
 - Merge key: (`vuln_class`, rel_path, overlapping region — column-aware, `end_column` exclusive,
   missing columns = whole line). Clustering is **anchor-based, not transitive**: findings are visited
-  own-engine first, then smallest region first, and each joins the first cluster whose anchor it
+  smallest region first (own engine only breaks ties), and each joins the first cluster whose anchor it
   overlaps, so a broad report cannot fuse two distinct sinks. Findings with missing CWE merge only if
   `vuln_class` mapped via rule_id; otherwise they stay separate.
 - Merged location = union of all contributors' regions. Evidence = sorted concatenation (duplicates kept).
@@ -195,4 +195,5 @@ vulnhawk/
   accepted trade-off. Fingerprint ids prefixed `vh1-` (bump if the recipe changes).
 - 2026-10-08 (Codex M0 code review): anchor-based column-aware clustering (no transitive fusion),
   `sink` field for fingerprints, union locations, evidence concatenation, canonical-JSON tie-breaks,
-  end-column validation.
+  end-column validation. Round 2: precision-first anchors, union on effective ends, merged
+  findings keep a recorded `sink`; randomized order-independence test.
