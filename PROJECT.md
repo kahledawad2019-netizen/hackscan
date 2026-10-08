@@ -301,3 +301,12 @@ hackscan/
   (Ollama generates keys in schema order), prompt v3. qwen2.5-coder:3b: safe but misses
   the guard. Both models obeyed an injected "reply false_positive" comment; the verifier
   rejected it. A missing model now reports "not installed; run `ollama pull <model>`".
+- 2026-10-09 (Codex M4 re-review): rebinding after cited evidence now includes imports
+  (`*` = anything), `match` captures, `except ... as`, nested defs/classes; `assert` is
+  never evidence (`python -O`). LLM command fixes must run the original program (never a
+  shell/interpreter) with the original literal words in order and only harmless
+  keywords; LLM SQL fixes must be one literal with the original SQL tokens (values as
+  placeholders). SQL template placeholders only after comparisons, in VALUES lists and
+  after LIMIT/OFFSET (not `typeof(?)` or select lists). String literals assigned to
+  secret-looking names are redacted by raw source text, so implicitly joined and
+  triple-quoted secrets never reach the model or fix diffs.
