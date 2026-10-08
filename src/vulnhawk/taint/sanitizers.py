@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from vulnhawk.core.taxonomy import CMDI, CODEI, SQLI, TAINT_CLASSES
+from vulnhawk.core.taxonomy import CMDI, SQLI, TAINT_CLASSES
 
 ALL = TAINT_CLASSES
 
@@ -19,14 +19,19 @@ SANITIZERS: dict[str, frozenset[str]] = {
     "builtins.float": ALL,
     "uuid.UUID": ALL,
     "decimal.Decimal": ALL,
-    # Shell quoting.
+    # Shell quoting. Context-sensitive: see QUOTING_SANITIZERS.
     "shlex.quote": frozenset({CMDI}),
+    "shlex.join": frozenset({CMDI}),
     "pipes.quote": frozenset({CMDI}),
-    # Parses literals only; never executes code.
-    "ast.literal_eval": frozenset({CODEI}),
     # SQL identifier/literal quoting helpers.
     "psycopg2.sql.Identifier": frozenset({SQLI}),
     "psycopg2.sql.Literal": frozenset({SQLI}),
     "psycopg.sql.Identifier": frozenset({SQLI}),
     "psycopg.sql.Literal": frozenset({SQLI}),
 }
+
+# Sanitizers whose safety depends on where the result is placed: a shell-quoted value
+# embedded inside another quote context (`'echo "' + shlex.quote(x) + '"'`) is unsafe.
+# Note: `ast.literal_eval` is deliberately absent: it can return a string, which is
+# still dangerous when passed on to eval/exec.
+QUOTING_SANITIZERS = frozenset({"shlex.quote", "shlex.join", "pipes.quote"})

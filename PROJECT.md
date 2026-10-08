@@ -219,3 +219,11 @@ vulnhawk/
   `request.*`, `request`/`req` parameters (Django/DRF/Starlette/FastAPI), route-handler
   parameters, `input()`, `sys.argv`, `sys.stdin`. Confirmed = +35 confidence with a source
   trace. Inline suppression reason renamed to `inline:vulnhawk-ignore` (no spaces).
+- 2026-10-08 (Codex M2 review): fixed five unsound suppressions. Taint values now track
+  mutability (a mutable object that is aliased, mutated, passed to an unmodeled call, stored
+  elsewhere or captured by a nested scope joins `unknown`), shell-quote context
+  (`shlex.quote` safety is dropped when the surrounding string may open a quote), and
+  statements are scanned in evaluation order (walrus/mutation/sink ordering). Module values
+  count as constants only if immutable. `ast.literal_eval` removed from sanitizers.
+  `self.request` (class-based views) is a source. Each case is a regression test that fails
+  on the previous engine.

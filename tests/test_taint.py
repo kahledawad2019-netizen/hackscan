@@ -341,3 +341,158 @@ def test_inline_directive_on_closing_line_of_multiline_call():
 def test_directive_inside_string_does_not_count():
     (f,) = scan('def f():\n    os.system(input() + "# vulnhawk: ignore")\n')
     assert f.status is Status.CONFIRMED
+
+
+# -- soundness regressions (Codex M2 review + related cases) -------------------------------
+# Each of these must NOT be suppressed: attacker input can reach the sink.
+
+NOT_SUPPRESSED_CASES = {
+    "shlex.quote inside double quotes": """
+        def f():
+            os.system('echo "' + shlex.quote(input()) + '"')
+        """,
+    "shlex.quote inside f-string quotes": """
+        def f():
+            os.system(f'echo "{shlex.quote(input())}"')
+        """,
+    "shlex.quote with quoted template variable": """
+        def f():
+            prefix = 'echo "'
+            os.system(prefix + shlex.quote(input()))
+        """,
+    "aliased list mutation": """
+        def f():
+            parts = ["echo "]
+            alias = parts
+            alias.append(input())
+            os.system("".join(parts))
+        """,
+    "mutation inside an assignment": """
+        def f():
+            parts = ["echo "]
+            result = parts.append(input())
+            os.system("".join(parts))
+        """,
+    "list passed to an unmodeled call": """
+        def f():
+            parts = ["echo "]
+            fill(parts)
+            os.system("".join(parts))
+        """,
+    "list stored on another object": """
+        def f(holder):
+            parts = ["echo "]
+            holder.items = parts
+            holder.refresh()
+            os.system("".join(parts))
+        """,
+    "nested list mutation": """
+        def f():
+            rows = [["echo "]]
+            row = rows[0]
+            row.append(input())
+            os.system("".join(rows[0]))
+        """,
+    "nonlocal rebinding in a closure": """
+        def f():
+            cmd = "ls"
+            def change():
+                nonlocal cmd
+                cmd = input()
+            change()
+            os.system(cmd)
+        """,
+    "closure mutating a captured list": """
+        def f():
+            parts = ["echo "]
+            def add():
+                parts.append(input())
+            add()
+            os.system("".join(parts))
+        """,
+    "module list mutated by another function": """
+        CMD = ["echo "]
+
+        def set_cmd():
+            CMD.append(input())
+
+        def run_cmd():
+            os.system("".join(CMD))
+        """,
+    "module-level list mutated via a function call": """
+        CMD = ["echo "]
+
+        def add():
+            CMD.append(input())
+
+        add()
+        os.system("".join(CMD))
+        """,
+    "walrus in the same condition as the sink": """
+        def f():
+            cmd = "echo safe"
+            if (cmd := input()) and os.system(cmd):
+                pass
+        """,
+}
+
+
+@pytest.mark.parametrize("code", NOT_SUPPRESSED_CASES.values(), ids=NOT_SUPPRESSED_CASES.keys())
+def test_no_unsound_suppression(code: str):
+    findings = [f for f in scan(code) if f.rule_id == "VH-CMDI-001"]
+    assert findings
+    assert all(f.status is not Status.SUPPRESSED for f in findings), [
+        (f.status, f.suppression) for f in findings
+    ]
+
+
+def test_literal_eval_is_not_an_eval_sanitizer():
+    (f,) = scan("import ast\n\ndef f():\n    eval(ast.literal_eval(input()))\n")
+    assert f.status is Status.CONFIRMED
+
+
+def test_shlex_quote_in_plain_context_still_sanitizes():
+    assert verdict(
+        """
+        def f():
+            os.system("ls -l " + shlex.quote(input()) + " | wc -l")
+        """
+    ) == (Status.SUPPRESSED, SANITIZED)
+
+
+def test_immutable_values_survive_calls_and_closures():
+    assert verdict(
+        """
+        def f():
+            cmd = "ls"
+            log(cmd)
+            def show():
+                print(cmd)
+            show()
+            os.system(cmd)
+        """
+    ) == (Status.SUPPRESSED, CONSTANT_INPUT)
+
+
+def test_read_only_list_use_keeps_constant():
+    assert verdict(
+        """
+        def f():
+            parts = ["ls", "-la"]
+            n = len(parts)
+            os.system(" ".join(parts))
+        """
+    ) == (Status.SUPPRESSED, CONSTANT_INPUT)
+
+
+def test_django_class_view_self_request_is_a_source():
+    assert (
+        verdict(
+            """
+        class Run(View):
+            def post(self, request):
+                os.system(self.request.POST["cmd"])
+        """
+        )[0]
+        is Status.CONFIRMED
+    )
