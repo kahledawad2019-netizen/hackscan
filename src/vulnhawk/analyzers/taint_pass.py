@@ -42,6 +42,7 @@ PRODUCER = "taint"
 CONSTANT_INPUT = "taint:constant_input"
 SANITIZED = "taint:sanitized"
 CONFIRMED_CONFIDENCE_BOOST = 35
+POSIX_QUOTED_CONFIDENCE = 20
 MAX_LOOP_ITERATIONS = 5
 
 # Calls that neither mutate nor retain their arguments.
@@ -174,6 +175,14 @@ def concat(values: list[Taint]) -> Taint:
     return replace(result, mutable=False)
 
 
+def unquote(value: Taint) -> Taint:
+    """Any transformation of a shell-quoted value (strip, replace, slicing, repr...) may
+    break the quoting, so quoting-based safety does not survive it."""
+    if not value.quote_sanitized:
+        return value
+    return replace(value, safe_for=value.safe_for - {CMDI}, quote_sanitized=False)
+
+
 def literal(value: object) -> Taint:
     if isinstance(value, (str, bytes)):
         text = value if isinstance(value, str) else value.decode("latin-1")
@@ -232,6 +241,21 @@ def _decide(finding: Finding, taint: Taint | None) -> Finding:
             evidence=(
                 *finding.evidence,
                 Evidence(PRODUCER, "taint_verdict", "Every path supplies a constant value."),
+            ),
+        )
+    if finding.vuln_class == CMDI and CMDI in taint.safe_for and taint.quote_sanitized:
+        # shlex.quote protects POSIX shells only; under Windows cmd.exe `&`, `|` still
+        # chain commands. The target platform is unknown, so keep it visible.
+        return replace(
+            finding,
+            confidence=min(finding.confidence, POSIX_QUOTED_CONFIDENCE),
+            evidence=(
+                *finding.evidence,
+                Evidence(
+                    PRODUCER,
+                    "taint_verdict",
+                    "Shell-quoted with POSIX quoting (shlex.quote); safe on POSIX shells only.",
+                ),
             ),
         )
     if finding.vuln_class in taint.safe_for:
@@ -355,6 +379,9 @@ class _FunctionEngine:
         # Flow-insensitive alias groups among names that may share a mutable object.
         self.groups: dict[str, set[str]] = {}
         self.closure_loads, self.closure_stores = _closure_names(scope)
+        # States at which an exception may be raised / control may leave a `try` early;
+        # one collector per active `try` statement.
+        self.try_states: list[list[Env]] = []
 
     # -- statements ------------------------------------------------------------------------
 
@@ -372,8 +399,12 @@ class _FunctionEngine:
         return env
 
     def exec_stmt(self, stmt: ast.stmt, env: Env) -> Env | None:
+        if self.try_states:  # any statement may raise (or return) from here
+            self.try_states[-1].append(dict(env))
         for node in _header_nodes(stmt):
             self._scan(node, env)
+        if self.try_states and isinstance(stmt, (ast.Return, ast.Raise)):
+            self.try_states[-1].append(dict(env))  # after evaluating e.g. `return x := ...`
 
         if isinstance(stmt, ast.Assign):
             value = self.eval(stmt.value, env)
@@ -452,16 +483,28 @@ class _FunctionEngine:
         return self.exec_block(stmt.orelse, exit_env)  # type: ignore[attr-defined]
 
     def _try(self, stmt: ast.stmt, env: Env) -> Env | None:
+        # Handlers can be entered from any point in the body, so they see the join of
+        # every state the body passed through (including just before a raise/return).
+        self.try_states.append([dict(env)])
         body_out = self.exec_block(stmt.body, dict(env))  # type: ignore[attr-defined]
-        may_raise = join_env(env, body_out)
+        raise_points = list(self.try_states[-1])
         outs: Env | None = self.exec_block(stmt.orelse, body_out)  # type: ignore[attr-defined]
+        handler_entry: Env | None = None
+        for state in [*raise_points, body_out]:
+            handler_entry = join_env(handler_entry, state)
         for handler in stmt.handlers:  # type: ignore[attr-defined]
-            h_env = dict(may_raise or env)
+            h_env = dict(handler_entry or env)
             if handler.name:
                 h_env[handler.name] = UNKNOWN
             outs = join_env(outs, self.exec_block(handler.body, h_env))
-        final_in = outs if outs is not None else dict(may_raise or env)
-        final = self.exec_block(stmt.finalbody, final_in)  # type: ignore[attr-defined]
+        leave_points = self.try_states.pop()  # body + orelse + handlers
+        if self.try_states:  # an enclosing try sees these states too
+            self.try_states[-1].extend(leave_points)
+        # `finally` runs on normal exit and on every early exit (raise/return/break).
+        final_in: Env | None = outs
+        for state in leave_points:
+            final_in = join_env(final_in, state)
+        final = self.exec_block(stmt.finalbody, final_in or dict(env))  # type: ignore[attr-defined]
         return final if outs is not None else None
 
     def _assign(self, target: ast.AST, value: Taint, env: Env, value_expr: ast.AST | None):
@@ -538,14 +581,15 @@ class _FunctionEngine:
                 env[n] = combine((env[n], value))
 
     def _mutable_names_in(self, expr: ast.AST, env: Env) -> list[str]:
-        """Local names inside `expr` (outside calls) that may hold a mutable object."""
+        """Local names anywhere in `expr` that may hold a mutable object. Calls are included:
+        `dict(cmd=parts)` or `wrap(parts)` may keep a reference to `parts`."""
         out = []
         stack = [expr]
         while stack:
             node = stack.pop()
             if isinstance(node, ast.Name) and node.id in env and env[node.id].mutable:
                 out.append(node.id)
-            elif not isinstance(node, (ast.Call, *FUNCTION_TYPES, *COMPREHENSION_TYPES)):
+            elif not isinstance(node, FUNCTION_TYPES):
                 stack.extend(ast.iter_child_nodes(node))
         return out
 
@@ -561,7 +605,7 @@ class _FunctionEngine:
         if isinstance(node, ast.Attribute):
             return self._attribute(node, env)
         if isinstance(node, ast.Subscript):
-            return self.eval(node.value, env)
+            return unquote(self.eval(node.value, env))  # slicing can strip the quotes
         if isinstance(node, ast.Call):
             return self._call(node, env)
         if isinstance(node, ast.Compare) or (
@@ -674,12 +718,14 @@ class _FunctionEngine:
             if func.attr in TEMPLATE_METHODS:
                 return concat([receiver, *args])
             if func.attr in STRING_METHODS:
-                return replace(combine((receiver, *args)), mutable=False)
-            return combine((receiver, *args))
+                value = replace(combine((receiver, *args)), mutable=False)
+                return value if func.attr in {"encode", "decode"} else unquote(value)
+            return unquote(combine((receiver, *args)))
         if names & MUTABLE_BUILTINS:
             return replace(combine(args) if args else CONST, mutable=True)
         if names & PURE_BUILTINS:
-            return combine(args) if args else CONST
+            value = combine(args) if args else CONST
+            return value if names == {"str"} else unquote(value)  # repr() adds quotes
         # Unknown function: taint flows through, but the result is not provably constant.
         return combine((UNKNOWN, *args))
 

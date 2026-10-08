@@ -227,3 +227,10 @@ vulnhawk/
   count as constants only if immutable. `ast.literal_eval` removed from sanitizers.
   `self.request` (class-based views) is a source. Each case is a regression test that fails
   on the previous engine.
+- 2026-10-08 (Codex M2 re-review): `except`/`finally` see the join of every state the `try`
+  body passed through; aliases are tracked through calls/constructors (`dict(cmd=parts)`);
+  any transformation of a shell-quoted value (strip/replace/slicing/repr) drops quoting
+  safety. **Policy:** `shlex.quote` protects POSIX shells only (not Windows `cmd.exe`), and
+  the target platform is unknown, so POSIX-quoted commands are never suppressed; they stay
+  candidates at confidence 20 with an explanatory note. (A `--shell posix` option to restore
+  suppression can be added in M3 config.)

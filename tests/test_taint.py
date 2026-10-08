@@ -130,13 +130,19 @@ def test_while_loop_and_try_except():
     )
 
 
-def test_sanitizer_suppresses_only_its_class():
-    assert verdict(
+def test_shell_quoting_is_kept_visible_at_low_confidence():
+    (f,) = scan(
         """
         def f():
             os.system("ping " + shlex.quote(input()))
         """
-    ) == (Status.SUPPRESSED, SANITIZED)
+    )
+    assert f.status is Status.CANDIDATE  # POSIX-only protection: never suppressed
+    assert f.confidence == 20
+    assert any("POSIX" in e.message for e in f.evidence)
+
+
+def test_sanitizer_applies_only_to_its_class():
     assert (
         verdict(
             """
@@ -428,6 +434,49 @@ NOT_SUPPRESSED_CASES = {
         add()
         os.system("".join(CMD))
         """,
+    "exception raised after taint": """
+        def f():
+            cmd = "echo safe"
+            try:
+                cmd = input()
+                raise ValueError()
+            except ValueError:
+                os.system(cmd)
+        """,
+    "finally after tainted early return": """
+        def f():
+            cmd = "echo safe"
+            try:
+                cmd = input()
+                return
+            finally:
+                os.system(cmd)
+        """,
+    "exception inside nested branch": """
+        def f(flag):
+            cmd = "echo safe"
+            try:
+                if flag:
+                    cmd = input()
+                    risky()
+                cmd = "echo reset"
+            except Exception:
+                os.system(cmd)
+        """,
+    "list held by dict() constructor": """
+        def f():
+            parts = ["echo "]
+            wrapper = dict(cmd=parts)
+            wrapper["cmd"].append(input())
+            os.system("".join(parts))
+        """,
+    "list held by unknown wrapper call": """
+        def f():
+            parts = ["echo "]
+            box = Box(parts)
+            box.items.append(input())
+            os.system("".join(parts))
+        """,
     "walrus in the same condition as the sink": """
         def f():
             cmd = "echo safe"
@@ -451,13 +500,28 @@ def test_literal_eval_is_not_an_eval_sanitizer():
     assert f.status is Status.CONFIRMED
 
 
-def test_shlex_quote_in_plain_context_still_sanitizes():
-    assert verdict(
+def test_shlex_quote_in_plain_context_is_low_confidence():
+    (f,) = scan(
         """
         def f():
             os.system("ls -l " + shlex.quote(input()) + " | wc -l")
         """
-    ) == (Status.SUPPRESSED, SANITIZED)
+    )
+    assert (f.status, f.confidence) == (Status.CANDIDATE, 20)
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        'shlex.quote(input()).strip("\'")',
+        "repr(shlex.quote(input()))",
+        "shlex.quote(input())[1:-1]",
+        'shlex.quote(input()).replace("\'", "")',
+    ],
+)
+def test_transforming_quoted_values_drops_quoting(expr: str):
+    (f,) = scan(f"def f():\n    os.system({expr})\n")
+    assert f.status is Status.CONFIRMED
 
 
 def test_immutable_values_survive_calls_and_closures():

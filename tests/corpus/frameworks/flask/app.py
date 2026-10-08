@@ -43,7 +43,7 @@ def calc():
 @app.route("/safe-ping")
 def safe_ping():
     host = shlex.quote(request.args.get("host", ""))
-    os.system("ping -c 1 " + host)  # expect-suppressed: VH-CMDI-001 taint:sanitized
+    os.system("ping -c 1 " + host)  # expect: VH-CMDI-001  (POSIX-quoted: kept, low confidence)
 
 
 @app.route("/safe-user")
