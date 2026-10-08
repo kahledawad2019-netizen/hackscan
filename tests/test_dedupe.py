@@ -4,7 +4,7 @@ import itertools
 import random
 from dataclasses import replace
 
-from vulnhawk.core.dedupe import merge_findings
+from vulnhawk.core.dedupe import _anchor_clusters, merge_findings
 from vulnhawk.core.fingerprint import assign_ids
 from vulnhawk.core.models import Evidence, Severity, Status
 
@@ -234,9 +234,36 @@ def test_randomized_order_independence(make_finding):
                 col = rng.randint(1, 20)
                 f = _cols(f, col, col + rng.randint(0, 10))
             findings.append(f)
+        for cluster in _anchor_clusters(findings):
+            assert all(a.location.overlaps(b.location) for a in cluster for b in cluster)
         baseline = [f.canonical_json() for f in assign_ids(merge_findings(findings))]
         for _ in range(5):
             shuffled = findings[:]
             rng.shuffle(shuffled)
             assert [f.canonical_json() for f in assign_ids(merge_findings(shuffled))] == baseline
             assert len(baseline) <= len(findings)
+
+
+def _multiline(f, line, col, end_line, end_col):
+    loc = replace(
+        f.location, start_line=line, start_column=col, end_line=end_line, end_column=end_col
+    )
+    return replace(f, location=loc)
+
+
+def test_broad_multiline_region_does_not_fuse_distinct_sinks(make_finding):
+    """Codex repro: 10:1-11:30 overlaps both 10:5-11:10 and 11:20-12:5, which are disjoint."""
+    broad = _multiline(make_finding(), 10, 1, 11, 30)
+    a = _multiline(make_finding(rule_id="semgrep:x", sources=("semgrep",)), 10, 5, 11, 10)
+    b = _multiline(make_finding(rule_id="bandit:B608", sources=("bandit",)), 11, 20, 12, 5)
+    for order in itertools.permutations([broad, a, b]):
+        merged = merge_findings(order)
+        assert len(merged) == 2
+
+
+def test_short_bridge_region_does_not_fuse_distinct_sinks(make_finding):
+    """Even when the bridging report is the *smallest* region, disjoint sinks stay apart."""
+    a = _cols(make_finding(), 1, 10)
+    b = _cols(make_finding(rule_id="semgrep:x", sources=("semgrep",)), 12, 22)
+    bridge = _cols(make_finding(rule_id="bandit:B608", sources=("bandit",)), 8, 14)
+    assert len(merge_findings([a, b, bridge])) == 2

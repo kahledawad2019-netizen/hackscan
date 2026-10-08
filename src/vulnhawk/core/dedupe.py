@@ -2,13 +2,13 @@
 
 Pipeline order: collect (own engine + importers) -> `merge_findings` -> `assign_ids`.
 
-Clustering is anchor-based, not transitive: findings are visited from most to least
-precise (smallest region first, regardless of source), and each joins the first cluster
-whose *anchor* (the cluster's first, most precise member) it overlaps. A broad finding
-spanning two distinct
-sinks therefore joins one of them instead of fusing them together.
+Clustering is not transitive. Invariant: every pair of findings in a cluster overlaps.
+Findings are visited from most to least precise (smallest region first, own engine breaks
+ties) and each joins the first cluster in which it overlaps *every* member; otherwise it
+starts a new cluster. Two findings that do not overlap each other (distinct sinks) can
+therefore never be fused, whatever a third, broader report covers.
 
-A finding may join a cluster only when it shares `vuln_class` and path with the anchor,
+A finding may join a cluster only when it shares `vuln_class` and path with its members,
 their regions overlap (column-aware), and both identities are grounded
 (see `taxonomy.is_mergeable_class`).
 """
@@ -59,7 +59,7 @@ def _anchor_clusters(members: list[Finding]) -> list[list[Finding]]:
     clusters: list[list[Finding]] = []
     for f in sorted(members, key=_precision_key):
         for cluster in clusters:
-            if cluster[0].location.overlaps(f.location):
+            if all(m.location.overlaps(f.location) for m in cluster):
                 cluster.append(f)
                 break
         else:

@@ -90,10 +90,11 @@ class Region:
 
     @property
     def span(self) -> tuple[int, float]:
-        """Size used to prefer precise regions: (lines, columns)."""
-        lines = self.end_line - self.start_line
-        cols = self.end_pos[1] - self.start_column if lines == 0 else math.inf
-        return (lines, cols)
+        """Ordering heuristic preferring precise regions: (extra lines, column delta).
+
+        Only used to pick visit order; correctness of dedupe does not depend on it.
+        """
+        return (self.end_line - self.start_line, self.end_pos[1] - self.start_column)
 
     def overlaps(self, other: Region) -> bool:
         """Position overlap (line and column aware) within the same file."""

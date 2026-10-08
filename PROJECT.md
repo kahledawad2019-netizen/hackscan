@@ -47,9 +47,9 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 
 **Dedupe / merge policy** (deterministic, independent of importer order)
 - Merge key: (`vuln_class`, rel_path, overlapping region — column-aware, `end_column` exclusive,
-  missing columns = whole line). Clustering is **anchor-based, not transitive**: findings are visited
-  smallest region first (own engine only breaks ties), and each joins the first cluster whose anchor it
-  overlaps, so a broad report cannot fuse two distinct sinks. Findings with missing CWE merge only if
+  missing columns = whole line). Clustering is **not transitive** — invariant: every pair of findings
+  in a cluster overlaps. Findings are visited smallest region first (own engine breaks ties) and join
+  the first cluster in which they overlap every member, so two disjoint sinks can never be fused. Findings with missing CWE merge only if
   `vuln_class` mapped via rule_id; otherwise they stay separate.
 - Merged location = union of all contributors' regions. Evidence = sorted concatenation (duplicates kept).
 - All tie-breaks fall back to the finding's canonical JSON, so every result is input-order independent.
