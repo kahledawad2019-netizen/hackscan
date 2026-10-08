@@ -1,0 +1,69 @@
+{
+  "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Semgrep OSS",
+          "semanticVersion": "1.90.0",
+          "rules": [
+            {
+              "id": "python.flask.security.injection.tainted-sql-string.tainted-sql-string",
+              "name": "python.flask.security.injection.tainted-sql-string.tainted-sql-string",
+              "shortDescription": {"text": "Semgrep Finding: python.flask.security.injection.tainted-sql-string.tainted-sql-string"},
+              "fullDescription": {"text": "Detected user input used to manually construct a SQL string."},
+              "defaultConfiguration": {"level": "error"},
+              "properties": {
+                "precision": "very-high",
+                "tags": ["CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')", "HIGH CONFIDENCE", "OWASP-A03:2021 - Injection", "security"]
+              }
+            },
+            {
+              "id": "python.lang.security.audit.dangerous-system-call-tainted-env-args.dangerous-system-call-tainted-env-args",
+              "name": "python.lang.security.audit.dangerous-system-call-tainted-env-args.dangerous-system-call-tainted-env-args",
+              "shortDescription": {"text": "Semgrep Finding: dangerous-system-call"},
+              "fullDescription": {"text": "Found user-controlled data used in a system call."},
+              "defaultConfiguration": {"level": "error"},
+              "properties": {"precision": "very-high", "tags": ["CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')", "security"]}
+            },
+            {
+              "id": "python.flask.security.audit.debug-enabled.debug-enabled",
+              "name": "python.flask.security.audit.debug-enabled.debug-enabled",
+              "shortDescription": {"text": "Semgrep Finding: debug-enabled"},
+              "fullDescription": {"text": "Detected Flask app with debug=True."},
+              "defaultConfiguration": {"level": "warning"},
+              "properties": {"precision": "very-high", "tags": ["CWE-489: Active Debug Code", "security"]}
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "python.flask.security.injection.tainted-sql-string.tainted-sql-string",
+          "level": "error",
+          "message": {"text": "Detected user input used to manually construct a SQL string."},
+          "locations": [{"physicalLocation": {"artifactLocation": {"uri": "app.py", "uriBaseId": "%SRCROOT%"},
+            "region": {"startLine": 15, "startColumn": 23, "endLine": 15, "endColumn": 62,
+                       "snippet": {"text": "    return db.execute(f\"SELECT * FROM users WHERE id = {uid}\").fetchall()"}}}}],
+          "fingerprints": {"matchBasedId/v1": "4c1f0d9e"}
+        },
+        {
+          "ruleId": "python.lang.security.audit.dangerous-system-call-tainted-env-args.dangerous-system-call-tainted-env-args",
+          "level": "error",
+          "message": {"text": "Found user-controlled data used in a system call."},
+          "locations": [{"physicalLocation": {"artifactLocation": {"uri": "app.py", "uriBaseId": "%SRCROOT%"},
+            "region": {"startLine": 20, "startColumn": 5, "endLine": 20, "endColumn": 51,
+                       "snippet": {"text": "    os.system(\"ping -c 1 \" + request.args[\"host\"])"}}}}]
+        },
+        {
+          "ruleId": "python.flask.security.audit.debug-enabled.debug-enabled",
+          "level": "warning",
+          "message": {"text": "Detected Flask app with debug=True."},
+          "locations": [{"physicalLocation": {"artifactLocation": {"uri": "../outside.py"},
+            "region": {"startLine": 3}}}]
+        }
+      ]
+    }
+  ]
+}

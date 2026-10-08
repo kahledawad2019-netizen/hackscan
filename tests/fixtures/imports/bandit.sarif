@@ -1,0 +1,251 @@
+{
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Bandit",
+          "organization": "PyCQA",
+          "rules": [
+            {
+              "id": "B105",
+              "name": "hardcoded_password_string",
+              "properties": {
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-259"
+                ],
+                "precision": "medium"
+              },
+              "helpUri": "https://bandit.readthedocs.io/en/1.9.4/plugins/b105_hardcoded_password_string.html"
+            },
+            {
+              "id": "B608",
+              "name": "hardcoded_sql_expressions",
+              "properties": {
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-89"
+                ],
+                "precision": "medium"
+              },
+              "helpUri": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html"
+            },
+            {
+              "id": "B605",
+              "name": "start_process_with_a_shell",
+              "properties": {
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-78"
+                ],
+                "precision": "high"
+              },
+              "helpUri": "https://bandit.readthedocs.io/en/1.9.4/plugins/b605_start_process_with_a_shell.html"
+            },
+            {
+              "id": "B324",
+              "name": "hashlib",
+              "properties": {
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-327"
+                ],
+                "precision": "high"
+              },
+              "helpUri": "https://bandit.readthedocs.io/en/1.9.4/plugins/b324_hashlib.html"
+            }
+          ],
+          "version": "1.9.4",
+          "semanticVersion": "1.9.4"
+        }
+      },
+      "invocations": [
+        {
+          "executionSuccessful": true,
+          "endTimeUtc": "2026-10-08T20:31:34Z"
+        }
+      ],
+      "properties": {
+        "metrics": {
+          "_totals": {
+            "loc": 16,
+            "nosec": 0,
+            "skipped_tests": 0,
+            "SEVERITY.UNDEFINED": 0,
+            "CONFIDENCE.UNDEFINED": 0,
+            "SEVERITY.LOW": 1,
+            "CONFIDENCE.LOW": 0,
+            "SEVERITY.MEDIUM": 1,
+            "CONFIDENCE.MEDIUM": 2,
+            "SEVERITY.HIGH": 2,
+            "CONFIDENCE.HIGH": 2
+          },
+          ".\\app.py": {
+            "loc": 16,
+            "nosec": 0,
+            "skipped_tests": 0,
+            "SEVERITY.UNDEFINED": 0,
+            "SEVERITY.LOW": 1,
+            "SEVERITY.MEDIUM": 1,
+            "SEVERITY.HIGH": 2,
+            "CONFIDENCE.UNDEFINED": 0,
+            "CONFIDENCE.LOW": 0,
+            "CONFIDENCE.MEDIUM": 2,
+            "CONFIDENCE.HIGH": 2
+          }
+        }
+      },
+      "results": [
+        {
+          "message": {
+            "text": "Possible hardcoded password: 'hackscan-fake-token-0123456789'"
+          },
+          "level": "note",
+          "locations": [
+            {
+              "physicalLocation": {
+                "region": {
+                  "snippet": {
+                    "text": "API_TOKEN = \"hackscan-fake-token-0123456789\"\n"
+                  },
+                  "endColumn": 45,
+                  "endLine": 9,
+                  "startColumn": 13,
+                  "startLine": 9
+                },
+                "artifactLocation": {
+                  "uri": "app.py"
+                },
+                "contextRegion": {
+                  "snippet": {
+                    "text": "db = sqlite3.connect(\"app.db\")\nAPI_TOKEN = \"hackscan-fake-token-0123456789\"\n\n"
+                  },
+                  "endLine": 10,
+                  "startLine": 8
+                }
+              }
+            }
+          ],
+          "properties": {
+            "issue_confidence": "MEDIUM",
+            "issue_severity": "LOW"
+          },
+          "ruleId": "B105",
+          "ruleIndex": 0
+        },
+        {
+          "message": {
+            "text": "Possible SQL injection vector through string-based query construction."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "region": {
+                  "snippet": {
+                    "text": "    return db.execute(f\"SELECT * FROM users WHERE id = {uid}\").fetchall()\n"
+                  },
+                  "endColumn": 56,
+                  "endLine": 15,
+                  "startColumn": 25,
+                  "startLine": 15
+                },
+                "artifactLocation": {
+                  "uri": "app.py"
+                },
+                "contextRegion": {
+                  "snippet": {
+                    "text": "    uid = request.args.get(\"id\")\n    return db.execute(f\"SELECT * FROM users WHERE id = {uid}\").fetchall()\n\n"
+                  },
+                  "endLine": 16,
+                  "startLine": 14
+                }
+              }
+            }
+          ],
+          "properties": {
+            "issue_confidence": "MEDIUM",
+            "issue_severity": "MEDIUM"
+          },
+          "ruleId": "B608",
+          "ruleIndex": 1
+        },
+        {
+          "message": {
+            "text": "Starting a process with a shell, possible injection detected, security issue."
+          },
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "region": {
+                  "snippet": {
+                    "text": "    os.system(\"ping -c 1 \" + request.args[\"host\"])\n"
+                  },
+                  "endColumn": 51,
+                  "endLine": 20,
+                  "startColumn": 5,
+                  "startLine": 20
+                },
+                "artifactLocation": {
+                  "uri": "app.py"
+                },
+                "contextRegion": {
+                  "snippet": {
+                    "text": "def ping():\n    os.system(\"ping -c 1 \" + request.args[\"host\"])\n\n"
+                  },
+                  "endLine": 21,
+                  "startLine": 19
+                }
+              }
+            }
+          ],
+          "properties": {
+            "issue_confidence": "HIGH",
+            "issue_severity": "HIGH"
+          },
+          "ruleId": "B605",
+          "ruleIndex": 2
+        },
+        {
+          "message": {
+            "text": "Use of weak MD5 hash for security. Consider usedforsecurity=False"
+          },
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "region": {
+                  "snippet": {
+                    "text": "    return hashlib.md5(data).hexdigest()\n"
+                  },
+                  "endColumn": 29,
+                  "endLine": 24,
+                  "startColumn": 12,
+                  "startLine": 24
+                },
+                "artifactLocation": {
+                  "uri": "app.py"
+                },
+                "contextRegion": {
+                  "snippet": {
+                    "text": "def checksum(data):\n    return hashlib.md5(data).hexdigest()\n"
+                  },
+                  "endLine": 24,
+                  "startLine": 23
+                }
+              }
+            }
+          ],
+          "properties": {
+            "issue_confidence": "HIGH",
+            "issue_severity": "HIGH"
+          },
+          "ruleId": "B324",
+          "ruleIndex": 3
+        }
+      ]
+    }
+  ],
+  "version": "2.1.0",
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json"
+}

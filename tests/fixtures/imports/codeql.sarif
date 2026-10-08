@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "CodeQL",
+          "organization": "GitHub",
+          "semanticVersion": "2.19.0",
+          "rules": [
+            {
+              "id": "py/command-line-injection",
+              "name": "py/command-line-injection",
+              "shortDescription": {"text": "Uncontrolled command line"},
+              "fullDescription": {"text": "Using externally controlled strings in a command line may allow a malicious user to change the meaning of the command."},
+              "defaultConfiguration": {"enabled": true, "level": "error"},
+              "properties": {"tags": ["correctness", "security", "external/cwe/cwe-078", "external/cwe/cwe-088"],
+                             "precision": "high", "security-severity": "9.8"}
+            },
+            {
+              "id": "py/sql-injection",
+              "name": "py/sql-injection",
+              "shortDescription": {"text": "SQL query built from user-controlled sources"},
+              "fullDescription": {"text": "Building a SQL query from user-controlled sources is vulnerable to insertion of malicious SQL code by the user."},
+              "defaultConfiguration": {"enabled": true, "level": "error"},
+              "properties": {"tags": ["security", "external/cwe/cwe-089"], "precision": "high", "security-severity": "8.8"}
+            }
+          ]
+        }
+      },
+      "originalUriBaseIds": {"%SRCROOT%": {"uri": "file:///workspace/project/"}},
+      "results": [
+        {
+          "ruleId": "py/command-line-injection",
+          "ruleIndex": 0,
+          "message": {"text": "This command line depends on a [user-provided value](1)."},
+          "locations": [{"physicalLocation": {"artifactLocation": {"uri": "app.py", "uriBaseId": "%SRCROOT%", "index": 0},
+            "region": {"startLine": 20, "startColumn": 15, "endColumn": 50}}}],
+          "partialFingerprints": {"primaryLocationLineHash": "9a1b2c3d4e5f6a7b:1"}
+        },
+        {
+          "ruleId": "py/sql-injection",
+          "ruleIndex": 1,
+          "message": {"text": "This SQL query depends on a [user-provided value](1)."},
+          "locations": [{"physicalLocation": {"artifactLocation": {"uri": "app.py", "uriBaseId": "%SRCROOT%", "index": 0},
+            "region": {"startLine": 15, "startColumn": 23, "endColumn": 62}}}]
+        }
+      ]
+    }
+  ]
+}

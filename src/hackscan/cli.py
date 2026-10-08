@@ -1,13 +1,262 @@
-"""Command-line entry point. The `scan` command lands in M3."""
+"""Command-line interface.
+
+Exit codes: 0 = no failing findings, 1 = `--fail-on` threshold hit,
+2 = usage, configuration, plugin or (with `--strict-tools`) external tool error.
+"""
 
 from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
 
 import click
 
 from hackscan import __version__
+from hackscan.config import ConfigError, HackScanConfig, load, parse_import_format, parse_tools
+from hackscan.core.models import OWN_SOURCE, Finding, Severity, Status
+from hackscan.core.pipeline import ScanResult, scan
+from hackscan.plugins.loader import PluginError, resolve_plugins
+
+EXIT_OK, EXIT_FINDINGS, EXIT_ERROR = 0, 1, 2
+SEVERITIES = [s.value for s in Severity]
+TOOL_FAILURES = {"missing", "failed", "timeout"}
 
 
 @click.group()
 @click.version_option(__version__, prog_name="hackscan")
 def main() -> None:
     """HackScan: Python SAST orchestrator and verifier."""
+
+
+@main.command("scan")
+@click.argument("path", type=click.Path(exists=True, path_type=Path), default=".")
+@click.option("--format", "fmt", type=click.Choice(["text", "json", "sarif"]), default="text")
+@click.option("-o", "--output", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--severity", type=click.Choice(SEVERITIES), help="Minimum severity to report.")
+@click.option("--min-confidence", type=click.IntRange(0, 100), help="Minimum confidence.")
+@click.option(
+    "--fail-on",
+    type=click.Choice(SEVERITIES),
+    help="Exit 1 if an open finding is at least this severe.",
+)
+@click.option("--ignore", multiple=True, help="Glob of paths to skip (repeatable).")
+@click.option("--show-suppressed", is_flag=True, default=None, help="Include suppressed findings.")
+@click.option(
+    "--plugins",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Directory of custom rule plugins.",
+)
+@click.option("--with", "with_tools", help="Run external tools: semgrep,bandit,gitleaks.")
+@click.option(
+    "--import",
+    "imports",
+    multiple=True,
+    metavar="FORMAT=FILE",
+    help="Import a report: sarif|semgrep|bandit|codeql|gitleaks=FILE (repeatable).",
+)
+@click.option("--tool-timeout", type=click.IntRange(0), help="Seconds per tool (0 = none).")
+@click.option(
+    "--strict-tools", is_flag=True, default=None, help="Exit 2 if an external tool fails."
+)
+@click.option("--no-taint", is_flag=True, default=False, help="Skip the taint pass.")
+@click.option("--jobs", type=click.IntRange(0), help="Worker processes (0 = automatic).")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Use this config file instead of discovering .hackscan.yml.",
+)
+@click.option("-q", "--quiet", is_flag=True, help="Only print findings (no header/summary).")
+def scan_command(
+    path: Path,
+    fmt: str,
+    output: Path | None,
+    quiet: bool,
+    config_path: Path | None,
+    no_taint: bool,
+    with_tools: str | None,
+    imports: tuple[str, ...],
+    **options,
+) -> None:
+    """Scan PATH (a directory or a Python file) for vulnerabilities."""
+    try:
+        config = load(path, config_path).with_overrides(
+            severity=Severity(options["severity"]) if options["severity"] else None,
+            fail_on=Severity(options["fail_on"]) if options["fail_on"] else None,
+            min_confidence=options["min_confidence"],
+            ignore=tuple(options["ignore"]) or None,
+            show_suppressed=options["show_suppressed"],
+            plugins=options["plugins"].resolve() if options["plugins"] else None,
+            tool_timeout=options["tool_timeout"],
+            strict_tools=options["strict_tools"],
+            jobs=options["jobs"],
+            taint=False if no_taint else None,
+            with_tools=parse_tools(with_tools, click.BadParameter) if with_tools else None,
+            imports=_parse_imports(imports) if imports else None,
+        )
+        result = scan(path, config)
+        plugins = resolve_plugins(config.plugins)
+    except (ConfigError, PluginError, click.BadParameter) as exc:
+        click.echo(f"hackscan: error: {exc}", err=True)
+        sys.exit(EXIT_ERROR)
+
+    if fmt == "sarif":
+        from hackscan.sarif.generator import export_sarif
+
+        shown = _visible(result.findings, config, include_suppressed=True)
+        text = json.dumps(export_sarif(_with(result, shown), plugins), indent=2)
+    elif fmt == "json":
+        shown = _visible(result.findings, config, config.show_suppressed)
+        text = json.dumps(_json(result, shown), indent=2)
+    else:
+        shown = _visible(result.findings, config, config.show_suppressed)
+        text = _text(result, shown, config, quiet)
+
+    if output is not None:
+        output.write_text(text + "\n", encoding="utf-8")
+        if not quiet:
+            click.echo(f"hackscan: wrote {fmt} report to {output}", err=True)
+    else:
+        click.echo(text)
+
+    if config.strict_tools and any(r.status in TOOL_FAILURES for r in result.tool_runs):
+        click.echo("hackscan: error: an external tool failed (--strict-tools)", err=True)
+        sys.exit(EXIT_ERROR)
+    if config.fail_on is not None and _failing(result.findings, config):
+        sys.exit(EXIT_FINDINGS)
+    sys.exit(EXIT_OK)
+
+
+@main.command("rules")
+@click.option("--plugins", type=click.Path(exists=True, file_okay=False, path_type=Path))
+def rules_command(plugins: Path | None) -> None:
+    """List the detection rules."""
+    try:
+        loaded = resolve_plugins(plugins)
+    except PluginError as exc:
+        click.echo(f"hackscan: error: {exc}", err=True)
+        sys.exit(EXIT_ERROR)
+    for p in loaded:
+        cwe = ", ".join(p.cwe) or "-"
+        click.echo(f"{p.rule_id:<16} {p.severity.value:<8} {cwe:<10} {p.description}")
+
+
+# -- helpers ------------------------------------------------------------------------------
+
+
+def _parse_imports(values: tuple[str, ...]) -> tuple[tuple[str, Path], ...]:
+    out = []
+    for value in values:
+        fmt, sep, file = value.partition("=")
+        if not sep or not file:
+            raise click.BadParameter(f"--import expects FORMAT=FILE, got {value!r}")
+        report = Path(file)
+        if not report.is_file():
+            raise click.BadParameter(f"--import report not found: {file}")
+        out.append((parse_import_format(fmt, click.BadParameter), report.resolve()))
+    return tuple(out)
+
+
+def _visible(
+    findings: list[Finding], config: HackScanConfig, include_suppressed: bool
+) -> list[Finding]:
+    return [
+        f
+        for f in findings
+        if f.severity.rank >= config.severity.rank
+        and f.confidence >= config.min_confidence
+        and (include_suppressed or f.status is not Status.SUPPRESSED)
+    ]
+
+
+def _failing(findings: list[Finding], config: HackScanConfig) -> list[Finding]:
+    """Open (candidate/confirmed) findings at or above --fail-on; suppressed never count."""
+    assert config.fail_on is not None
+    return [
+        f
+        for f in findings
+        if f.status is not Status.SUPPRESSED
+        and f.severity.rank >= config.fail_on.rank
+        and f.confidence >= config.min_confidence
+    ]
+
+
+def _with(result: ScanResult, findings: list[Finding]) -> ScanResult:
+    return ScanResult(
+        root=result.root,
+        findings=findings,
+        files_scanned=result.files_scanned,
+        duration_seconds=result.duration_seconds,
+        errors=result.errors,
+        warnings=result.warnings,
+        tool_runs=result.tool_runs,
+    )
+
+
+def _json(result: ScanResult, findings: list[Finding]) -> dict:
+    return {
+        "tool": {"name": "hackscan", "version": __version__},
+        "root": result.root.as_posix(),
+        "stats": {
+            "files_scanned": result.files_scanned,
+            "duration_seconds": round(result.duration_seconds, 3),
+            "findings": len(findings),
+            "by_status": {s.value: sum(f.status is s for f in findings) for s in Status},
+        },
+        "findings": [f.to_dict() for f in findings],
+        "errors": result.errors,
+        "warnings": result.warnings,
+        "tool_runs": [vars(r) for r in result.tool_runs],
+    }
+
+
+def _text(result: ScanResult, findings: list[Finding], config: HackScanConfig, quiet: bool) -> str:
+    lines: list[str] = []
+    if not quiet:
+        lines.append(
+            f"HackScan {__version__} - scanned {result.files_scanned} files "
+            f"in {result.duration_seconds:.2f}s"
+        )
+        lines.append("")
+    ordered = sorted(
+        findings,
+        key=lambda f: (-f.severity.rank, f.status is not Status.CONFIRMED, f.sort_key()),
+    )
+    for f in ordered:
+        loc = f"{f.location.path}:{f.location.start_line}:{f.location.start_column}"
+        status = f.status.value
+        if f.status is Status.SUPPRESSED:
+            status = f"suppressed ({f.suppression})"
+        lines.append(
+            f"{f.severity.value.upper():<8} {status:<10} {loc}  {f.rule_id}  [{f.confidence}%]"
+        )
+        lines.append(f"    {f.message}")
+        if f.snippet:
+            lines.append(f"    | {f.snippet.splitlines()[0].strip()}")
+        lines.extend(
+            f"    > {e.message}" for e in f.evidence if e.kind in {"taint_step", "taint_verdict"}
+        )
+        if f.sources != (OWN_SOURCE,):
+            lines.append(f"    sources: {', '.join(f.sources)}")
+    if quiet:
+        return "\n".join(lines)
+    counts = {s: sum(f.status is s for f in findings) for s in Status}
+    hidden = sum(f.status is Status.SUPPRESSED for f in result.findings) - counts[Status.SUPPRESSED]
+    if not findings:
+        lines.append("No findings.")
+    lines.append("")
+    summary = (
+        f"Summary: {counts[Status.CONFIRMED]} confirmed, {counts[Status.CANDIDATE]} candidates"
+    )
+    if counts[Status.SUPPRESSED]:
+        summary += f", {counts[Status.SUPPRESSED]} suppressed shown"
+    if hidden:
+        summary += f", {hidden} suppressed hidden (--show-suppressed)"
+    lines.append(summary)
+    lines.extend(f"error: {e}" for e in result.errors)
+    lines.extend(f"warning: {w}" for w in result.warnings)
+    if config.fail_on is not None:
+        failing = len(_failing(result.findings, config))
+        lines.append(f"fail-on {config.fail_on.value}: {failing} open finding(s) at or above")
+    return "\n".join(lines)

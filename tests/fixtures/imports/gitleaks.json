@@ -1,0 +1,22 @@
+[
+  {
+    "Description": "Generic API Key",
+    "StartLine": 9,
+    "EndLine": 9,
+    "StartColumn": 14,
+    "EndColumn": 42,
+    "Match": "API_TOKEN = \"hackscan-fake-token-0123456789\"",
+    "Secret": "hackscan-fake-token-0123456789",
+    "File": "app.py",
+    "SymlinkFile": "",
+    "Commit": "",
+    "Entropy": 4.9,
+    "Author": "",
+    "Email": "",
+    "Date": "",
+    "Message": "",
+    "Tags": [],
+    "RuleID": "generic-api-key",
+    "Fingerprint": "app.py:generic-api-key:9"
+  }
+]

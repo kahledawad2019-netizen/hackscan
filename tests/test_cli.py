@@ -1,12 +1,176 @@
 from __future__ import annotations
 
+import json
+import shutil
+import textwrap
+from pathlib import Path
+
+import pytest
 from click.testing import CliRunner
 
 from hackscan import __version__
 from hackscan.cli import main
 
+CORPUS = Path(__file__).parent / "corpus"
+FRAMEWORKS = CORPUS / "frameworks"
+IMPORTS = Path(__file__).parent / "fixtures" / "imports"
+
+
+def run(*args: str):
+    return CliRunner().invoke(main, list(args))
+
 
 def test_version():
-    result = CliRunner().invoke(main, ["--version"])
+    result = run("--version")
     assert result.exit_code == 0
     assert __version__ in result.output
+
+
+def test_text_scan_reports_confirmed_findings():
+    result = run("scan", str(FRAMEWORKS))
+    assert result.exit_code == 0
+    assert "confirmed" in result.output
+    assert "Untrusted" in result.output
+    assert "Summary:" in result.output
+    assert "suppressed hidden" in result.output
+
+
+@pytest.mark.parametrize(
+    ("args", "code"),
+    [
+        (["--fail-on", "high"], 1),
+        (["--fail-on", "critical"], 0),  # no critical findings in the framework corpus
+        (["--fail-on", "low", "--min-confidence", "101"], 2),  # invalid value: usage error
+    ],
+)
+def test_fail_on_exit_codes(args: list[str], code: int):
+    assert run("scan", str(FRAMEWORKS), *args).exit_code == code
+
+
+def test_fail_on_ignores_suppressed(tmp_path: Path):
+    (tmp_path / "a.py").write_text("import os\ncmd = 'ls'\nos.system(cmd)\n")
+    assert run("scan", str(tmp_path), "--fail-on", "low").exit_code == 0
+
+
+def test_json_output_and_filters():
+    data = json.loads(run("scan", str(FRAMEWORKS), "--format", "json", "--severity", "high").output)
+    assert data["tool"]["name"] == "hackscan"
+    assert data["findings"]
+    assert all(f["severity"] in {"high", "critical"} for f in data["findings"])
+    assert all(f["status"] != "suppressed" for f in data["findings"])
+    shown = json.loads(run("scan", str(FRAMEWORKS), "--format", "json", "--show-suppressed").output)
+    assert any(f["status"] == "suppressed" for f in shown["findings"])
+
+
+def test_min_confidence_filter():
+    data = json.loads(run("scan", str(CORPUS), "--format", "json", "--min-confidence", "90").output)
+    assert data["findings"]
+    assert all(f["confidence"] >= 90 for f in data["findings"])
+
+
+def test_sarif_output_file(tmp_path: Path):
+    out = tmp_path / "out.sarif"
+    result = run("scan", str(FRAMEWORKS), "--format", "sarif", "-o", str(out))
+    assert result.exit_code == 0
+    log = json.loads(out.read_text(encoding="utf-8"))
+    assert log["version"] == "2.1.0"
+    assert any(r.get("suppressions") for r in log["runs"][0]["results"])
+
+
+def test_ignore_glob(tmp_path: Path):
+    (tmp_path / "keep.py").write_text("eval(input())\n")
+    (tmp_path / "legacy").mkdir()
+    (tmp_path / "legacy" / "old.py").write_text("eval(input())\n")
+    data = json.loads(run("scan", str(tmp_path), "--format", "json", "--ignore", "legacy").output)
+    assert [f["location"]["path"] for f in data["findings"]] == ["keep.py"]
+
+
+def test_import_option_and_bad_import():
+    report = IMPORTS / "codeql.sarif"
+    result = run(
+        "scan", str(IMPORTS / "project"), "--format", "json", "--import", f"codeql={report}"
+    )
+    data = json.loads(result.output)
+    assert any("codeql" in f["sources"] for f in data["findings"])
+    assert run("scan", str(IMPORTS / "project"), "--import", "nope=x").exit_code == 2
+
+
+def test_with_missing_tool_warns_and_strict_fails(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda _: None)
+    (tmp_path / "a.py").write_text("x = 1\n")
+    lenient = run("scan", str(tmp_path), "--with", "semgrep")
+    assert lenient.exit_code == 0
+    assert "not found on PATH" in lenient.output
+    assert run("scan", str(tmp_path), "--with", "semgrep", "--strict-tools").exit_code == 2
+
+
+def test_unknown_tool_is_usage_error(tmp_path: Path):
+    assert run("scan", str(tmp_path), "--with", "nmap").exit_code == 2
+
+
+def test_config_file_is_discovered(tmp_path: Path):
+    (tmp_path / ".hackscan.yml").write_text("ignore: [skip]\nfail-on: high\n")
+    (tmp_path / "skip").mkdir()
+    (tmp_path / "skip" / "x.py").write_text("eval(input())\n")
+    assert run("scan", str(tmp_path)).exit_code == 0
+    (tmp_path / "y.py").write_text("eval(input())\n")
+    assert run("scan", str(tmp_path)).exit_code == 1
+
+
+def test_bad_config_is_usage_error(tmp_path: Path):
+    (tmp_path / ".hackscan.yml").write_text("severity: extreme\n")
+    result = run("scan", str(tmp_path))
+    assert result.exit_code == 2
+    assert "severity" in result.output
+
+
+def test_no_taint_leaves_candidates(tmp_path: Path):
+    (tmp_path / "a.py").write_text("import os\nos.system(input())\n")
+    data = json.loads(run("scan", str(tmp_path), "--format", "json", "--no-taint").output)
+    assert [f["status"] for f in data["findings"]] == ["candidate"]
+
+
+def test_single_file_target(tmp_path: Path):
+    target = tmp_path / "one.py"
+    target.write_text("eval(input())\n")
+    data = json.loads(run("scan", str(target), "--format", "json").output)
+    assert data["stats"]["files_scanned"] == 1
+
+
+def test_quiet_and_rules_command():
+    quiet = run("scan", str(FRAMEWORKS), "-q")
+    assert "Summary" not in quiet.output and "HackScan" not in quiet.output
+    assert "HS-SQLI-001" in run("rules").output
+
+
+def test_plugins_option(tmp_path: Path):
+    plugins = tmp_path / "plugins"
+    plugins.mkdir()
+    (plugins / "p.py").write_text(
+        textwrap.dedent(
+            """
+            from hackscan.core.models import Severity
+            from hackscan.plugins import Match, RulePlugin
+
+            class Pickle(RulePlugin):
+                rule_id = "ACME-1"
+                name = "pickle"
+                description = "pickle.loads"
+                severity = Severity.HIGH
+                cwe = ("CWE-502",)
+
+                def check(self, node, ctx):
+                    if ctx.call_name(node) == "pickle.loads":
+                        yield Match(node, "pickle")
+            """
+        )
+    )
+    (tmp_path / "a.py").write_text("import pickle\npickle.loads(b)\n")
+    out = run("scan", str(tmp_path), "--format", "json", "--plugins", str(plugins)).output
+    assert [f["rule_id"] for f in json.loads(out)["findings"]] == ["ACME-1"]
+
+
+def test_parallel_and_serial_scans_agree():
+    serial = json.loads(run("scan", str(CORPUS), "--format", "json", "--jobs", "1").output)
+    parallel = json.loads(run("scan", str(CORPUS), "--format", "json", "--jobs", "2").output)
+    assert serial["findings"] == parallel["findings"]

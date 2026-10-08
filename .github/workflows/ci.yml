@@ -33,3 +33,18 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: uv run --group dev pytest
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv build
+      - name: Install the wheel in a clean environment and scan
+        run: |
+          uv venv /tmp/smoke
+          uv pip install --python /tmp/smoke dist/*.whl
+          /tmp/smoke/bin/hackscan --version
+          /tmp/smoke/bin/hackscan scan tests/corpus --format sarif -o /tmp/corpus.sarif
+      - name: Dogfood - HackScan scans its own source
+        run: /tmp/smoke/bin/hackscan scan src --fail-on high
