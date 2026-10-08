@@ -66,3 +66,4 @@ Issues = "https://github.com/kahledawad2019-netizen/hackscan/issues"
 # Inline code samples under test are clearer unwrapped.
 "tests/test_remediate.py" = ["E501"]
 "tests/test_llm.py" = ["E501"]
+"tests/test_ui.py" = ["E501"]

@@ -40,6 +40,8 @@ class ScanResult:
     warnings: list[str] = field(default_factory=list)  # external tool problems
     tool_runs: list[ToolRun] = field(default_factory=list)
     llm_reviewed: int = 0
+    # Values to redact from any raw text shown later (e.g. fix diffs). Never exported.
+    secrets: frozenset[str] = field(default=frozenset(), repr=False)
 
 
 def scan(target: Path, config: HackScanConfig) -> ScanResult:
@@ -104,6 +106,7 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
         errors=redact_messages([*sorted(errors), *external.errors], external.secrets),
         warnings=redact_messages(warnings, external.secrets),
         llm_reviewed=llm_reviewed,
+        secrets=frozenset(external.secrets),
         tool_runs=external.runs,
     )
 

@@ -39,8 +39,10 @@ FORMAT_MODULES = (
 )
 # A placeholder is only valid where SQL expects a *value*.
 _VALUE_POSITION_RE = re.compile(
-    r"(=|<|>|<=|>=|<>|!=|\(|,|\blike|\blimit|\boffset|\bin\s*\(|\bvalues\s*\()\s*$", re.I
+    r"(=|<|>|<=|>=|<>|!=|\(|,|\blike|\blimit|\boffset|\bvalues\s*\()\s*$", re.I
 )
+# `IN (` expects a list: `IN ({ids})` with ids="1,2" means two values, `IN (?)` one.
+_IN_LIST_RE = re.compile(r"\bin\s*\([^)]*$", re.I)
 SHELL_META = set("|&;<>$`*?(){}[]~!#\\'\"\n")
 
 
@@ -197,7 +199,7 @@ def _parameterize(parts: list[str | ast.AST], placeholder: str):
             if sql[-2:-1] == "%":
                 return None, []  # LIKE '%...' wildcard concatenation
             sql = sql[:-1]
-        if not _VALUE_POSITION_RE.search(sql.rstrip()):
+        if _IN_LIST_RE.search(sql.rstrip()) or not _VALUE_POSITION_RE.search(sql.rstrip()):
             return None, []  # identifier or keyword position: placeholders not allowed
         sql += placeholder
         params.append(part)
@@ -246,6 +248,11 @@ def _argv(expr: ast.AST, ctx: FileContext) -> list[str] | None:
     parts = _sql_parts(expr)  # same literal/value decomposition (f-string, +, %)
     if parts is None or not any(isinstance(p, ast.AST) for p in parts):
         return None
+    # f-strings and %-formatting call str() on values; argv elements must be strings.
+    stringify = any(
+        isinstance(n, ast.JoinedStr) or (isinstance(n, ast.BinOp) and isinstance(n.op, ast.Mod))
+        for n in ast.walk(expr)
+    )
     argv: list[str] = []
     for i, part in enumerate(parts):
         if isinstance(part, str):
@@ -259,7 +266,8 @@ def _argv(expr: ast.AST, ctx: FileContext) -> list[str] | None:
             return None  # glued to the preceding text/value
         if isinstance(nxt, str) and nxt and not nxt[0].isspace():
             return None  # glued to the following text
-        argv.append(ctx.segment(part))
+        text = ctx.segment(part)
+        argv.append(f"str({text})" if stringify else text)
     return argv or None
 
 
@@ -330,6 +338,11 @@ def _import_edit(ctx: FileContext, module: str) -> FixEdit | None:
         line, i = body[0].end_lineno + 1, 1  # after the module docstring
     while i < len(body) and isinstance(body[i], (ast.Import, ast.ImportFrom)):
         line, i = body[i].end_lineno + 1, i + 1  # after the leading import block
+    header = 0
+    for n, text in enumerate(ctx.lines[:2], start=1):
+        if (n == 1 and text.startswith("#!")) or re.match(r"^[ \t\f]*#.*?coding[:=]", text):
+            header = n  # shebang / PEP 263 cookie must stay on lines 1-2
+    line = max(line, header + 1)
     return FixEdit(Region(ctx.path, line, 1, line, 1), f"import {module}\n")
 
 

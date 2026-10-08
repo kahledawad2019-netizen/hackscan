@@ -67,3 +67,39 @@ def test_rich_exit_codes_match_plain():
     args = ["scan", str(FRAMEWORKS), "--fail-on", "high"]
     assert CliRunner().invoke(main, [*args, "--color", "always"]).exit_code == 1
     assert CliRunner().invoke(main, [*args, "--color", "never"]).exit_code == 1
+
+
+def test_control_sequences_from_model_or_code_are_neutralized(tmp_path):
+    from dataclasses import replace
+
+    from hackscan.core.models import Evidence
+
+    result = scan(FRAMEWORKS, HackScanConfig())
+    evil = "reviewed\x1b[2J\x1b[Hspoofed"
+    f = replace(
+        result.findings[0],
+        message="msg\x1b]0;title\x07",
+        evidence=(Evidence("llm", "llm_rationale", evil),),
+    )
+    out = recorded(lambda c: render(c, result, [f], HackScanConfig()))
+    assert "\x1b[2J" not in out and "\x1b]0;" not in out
+    assert "\\x1b[2J" in out  # shown escaped, visibly
+
+    from hackscan.cli import _text
+
+    plain = _text(result, [f], HackScanConfig(), quiet=False)
+    from hackscan.core.redact import strip_controls
+
+    assert "\x1b" not in strip_controls(plain)
+
+
+def test_fix_diff_context_is_redacted(tmp_path):
+    secret = "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+    (tmp_path / "m.py").write_text(
+        f'import hashlib\napi_key = "{secret}"\n\ndef f(d):\n    return hashlib.md5(d).hexdigest()\n'
+    )
+    out = (
+        CliRunner().invoke(main, ["scan", str(tmp_path), "--show-fixes", "--color", "never"]).output
+    )
+    assert "hashlib.sha256" in out
+    assert secret not in out

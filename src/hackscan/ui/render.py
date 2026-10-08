@@ -17,6 +17,7 @@ from rich.text import Text
 
 from hackscan import __version__
 from hackscan.core.models import OWN_SOURCE, Finding, Severity, Status
+from hackscan.core.redact import strip_controls as _safe
 
 SEVERITY_STYLE = {
     Severity.CRITICAL: "bold white on red",
@@ -64,9 +65,9 @@ def render(
         console.print(_finding_panel(f, show_fixes, diff_for))
     console.print(_summary(result, findings, config))
     for e in result.errors:
-        console.print(Text(f"error: {e}", style="bold red"))
+        console.print(Text(_safe(f"error: {e}"), style="bold red"))
     for w in result.warnings:
-        console.print(Text(f"warning: {w}", style="yellow"))
+        console.print(Text(_safe(f"warning: {w}"), style="yellow"))
 
 
 def _finding_panel(f: Finding, show_fixes: bool, diff_for) -> Panel:
@@ -78,25 +79,27 @@ def _finding_panel(f: Finding, show_fixes: bool, diff_for) -> Panel:
         (f.rule_id, "bold"),
         ("  " + f"{f.confidence}%", "dim"),
     )
-    location = f"{f.location.path}:{f.location.start_line}:{f.location.start_column}"
-    body: list = [Text(location, style=f"bold {ACCENT}"), Text(f.message)]
+    location = _safe(f"{f.location.path}:{f.location.start_line}:{f.location.start_column}")
+    body: list = [Text(location, style=f"bold {ACCENT}"), Text(_safe(f.message))]
     if f.status is Status.SUPPRESSED:
-        body.append(Text(f"suppressed: {f.suppression}", style="dim"))
+        body.append(Text(_safe(f"suppressed: {f.suppression}"), style="dim"))
     if f.snippet:
-        first = f.snippet.splitlines()[0]
+        first = _safe(f.snippet.splitlines()[0])
         body.append(Syntax(first.strip(), "python", theme="ansi_dark", background_color="default"))
     for e in f.evidence:
         if e.kind in EVIDENCE_KINDS:
             marker = "LLM" if e.producer == "llm" else ">"
-            body.append(Text(f"{marker} {e.message}", style="italic"))
+            body.append(Text(_safe(f"{marker} {e.message}"), style="italic"))
     if f.sources != (OWN_SOURCE,):
-        body.append(Text(f"sources: {', '.join(f.sources)}", style="dim"))
+        body.append(Text(_safe(f"sources: {', '.join(f.sources)}"), style="dim"))
     if f.fix is not None:
-        body.append(Text(f"fix: {f.fix.description}", style=ACCENT))
+        body.append(Text(_safe(f"fix: {f.fix.description}"), style=ACCENT))
         if show_fixes and diff_for is not None:
             diff = diff_for(f)
             if diff:
-                body.append(Syntax(diff, "diff", theme="ansi_dark", background_color="default"))
+                body.append(
+                    Syntax(_safe(diff), "diff", theme="ansi_dark", background_color="default")
+                )
     border = (
         "red"
         if f.status is Status.CONFIRMED

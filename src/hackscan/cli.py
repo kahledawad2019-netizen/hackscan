@@ -20,6 +20,7 @@ from hackscan import __version__
 from hackscan.config import ConfigError, HackScanConfig, load, parse_import_format, parse_tools
 from hackscan.core.models import OWN_SOURCE, Finding, Severity, Status
 from hackscan.core.pipeline import ScanResult, scan
+from hackscan.core.redact import redact_secretish, strip_controls
 from hackscan.plugins.loader import PluginError, resolve_plugins
 
 EXIT_OK, EXIT_FINDINGS, EXIT_ERROR = 0, 1, 2
@@ -187,6 +188,8 @@ def scan_command(
             text = None
         else:
             text = _text(result, shown, config, quiet, show_fixes)
+        if output is not None:
+            text = strip_controls(text)
 
     if output is not None:
         try:
@@ -198,7 +201,7 @@ def scan_command(
         if not quiet:
             click.echo(f"hackscan: wrote {fmt} report to {output}", err=True)
     elif text is not None:
-        click.echo(text)
+        click.echo(text if fmt != "text" else strip_controls(text))
 
     if result.errors and not config.allow_incomplete:
         click.echo(
@@ -329,9 +332,11 @@ def _diff(result: ScanResult, finding: Finding) -> str:
     try:
         path = result.root / finding.location.path
         source = path.read_text(encoding="utf-8")
-        return fix_diff(source, finding.fix, finding.location.path)
+        diff = fix_diff(source, finding.fix, finding.location.path)
     except (OSError, UnicodeDecodeError, ValueError):
         return ""
+    # Diff context shows raw source: redact anything secret-looking before printing.
+    return "\n".join(redact_secretish(line, result.secrets) for line in diff.splitlines())
 
 
 def _json(result: ScanResult, findings: list[Finding]) -> dict:

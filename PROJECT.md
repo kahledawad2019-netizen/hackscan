@@ -282,3 +282,14 @@ hackscan/
   re-running passes 1-2 shows the finding gone and no new ones. Measured locally: CPU-only
   Ollama with the reasoning model deepseek-r1:8b ignores `think: false` and exhausts its
   budget — reported as "no answer"; non-reasoning coder models are recommended.
+- 2026-10-09 (Codex M4 review): LLM suppression must vouch for *every* value in the sink
+  (any name, local or global; calls/attributes/subscripts in the sink are never vouched for)
+  — fixes a P0 where `safe + suffix` (global `suffix` from the environment) was suppressed.
+  LLM fixes must call an allow-listed safe API for the class (or keep the SQL receiver with
+  parameters), keep every original value, and never use `__import__`/`eval`/`shell=` etc.
+  The flagged-call field sent to the model and `--show-fixes` diff context are redacted;
+  fix replacements are redacted like other fields. C0/C1 control characters from code,
+  tools or the model are shown escaped, never emitted. `IN (...)` lists are not
+  parameterized (a single placeholder changes results); f-string/% argv values are wrapped
+  in `str()`; imports are never inserted above a shebang or encoding cookie; malformed
+  Ollama replies are discarded instead of crashing.

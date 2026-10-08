@@ -14,6 +14,7 @@ primary of a merged finding.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterable
 from dataclasses import replace
@@ -52,6 +53,44 @@ def redact_messages(messages: Iterable[str], secrets: Iterable[str]) -> list[str
     return [redact_text(m, secrets, literals=False) for m in messages]
 
 
+SECRET_NAME_RE = re.compile(r"(key|token|secret|passw|pwd|credential|auth)", re.I)
+_ASSIGN_LITERAL_RE = re.compile(
+    r"""(?P<name>[A-Za-z_][\w.]*)\s*[:=]\s*(?P<q>['"])(?P<value>(?:\\.|(?!(?P=q)).)*)(?P=q)"""
+)
+_LONG_LITERAL_RE = re.compile(r"""(['"])([A-Za-z0-9+/=_\-]{20,})\1""")
+# C0/C1 control characters except tab and newline: never let scanned code, tool output or
+# model text drive the terminal (clear screen, cursor moves, fake lines).
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def strip_controls(text: str) -> str:
+    return _CONTROL_RE.sub(lambda m: f"\\x{ord(m.group(0)):02x}", text)
+
+
+def _entropy(text: str) -> float:
+    counts = {c: text.count(c) for c in set(text)}
+    return -sum(n / len(text) * math.log2(n / len(text)) for n in counts.values())
+
+
+def redact_secretish(text: str, secrets: Iterable[str] = ()) -> str:
+    """Known secrets, literals assigned to secret-looking names, and long high-entropy
+    literals, for text that leaves the scanner in raw form (LLM context, diffs)."""
+    text = redact_text(text, secrets, literals=False)
+
+    def assigned(m: re.Match) -> str:
+        if SECRET_NAME_RE.search(m.group("name")):
+            return f"{m.group('name')} = {m.group('q')}{REDACTED}{m.group('q')}"
+        return m.group(0)
+
+    text = _ASSIGN_LITERAL_RE.sub(assigned, text)
+    return _LONG_LITERAL_RE.sub(
+        lambda m: (
+            m.group(0) if _entropy(m.group(2)) < 3.5 else f"{m.group(1)}{REDACTED}{m.group(1)}"
+        ),
+        text,
+    )
+
+
 def redact_findings(findings: list[Finding], secrets: Iterable[str]) -> list[Finding]:
     secrets = [s for s in set(secrets) if len(s) >= MIN_SECRET_LENGTH]
     out = []
@@ -79,6 +118,14 @@ def redact_findings(findings: list[Finding], secrets: Iterable[str]) -> list[Fin
                 snippet=clean(f.snippet),
                 sink=clean(f.sink),
                 evidence=tuple(replace(e, message=clean(e.message)) for e in f.evidence),
+                fix=_clean_fix(f.fix, clean),
             )
         out.append(new if new != f else f)
     return out
+
+
+def _clean_fix(fix, clean):
+    if fix is None:
+        return None
+    edits = tuple(replace(e, replacement=clean(e.replacement)) for e in fix.edits)
+    return replace(fix, description=clean(fix.description), edits=edits)

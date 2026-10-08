@@ -22,7 +22,6 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-import math
 import os
 import re
 import secrets as _secrets
@@ -36,7 +35,7 @@ from urllib.parse import urlparse
 
 from hackscan.analyzers.remediate import _call_at, _node_region, apply_edits
 from hackscan.core.models import Evidence, Finding, Fix, FixEdit, Status
-from hackscan.core.redact import REDACTED, redact_text
+from hackscan.core.redact import redact_secretish
 from hackscan.importers.common import SourceIndex
 from hackscan.plugins.base import FileContext
 
@@ -81,12 +80,6 @@ If and only if the verdict is "true_positive", "fixed_call" may contain a safe
 replacement for exactly the flagged call expression (a single Python expression, same
 behavior for legitimate input); otherwise null.
 Reply with JSON only, matching the requested schema."""
-
-SECRET_NAME_RE = re.compile(r"(key|token|secret|passw|pwd|credential|auth)", re.I)
-_ASSIGN_LITERAL_RE = re.compile(
-    r"""(?P<name>[A-Za-z_][\w.]*)\s*[:=]\s*(?P<q>['"])(?P<value>(?:\\.|(?!(?P=q)).)*)(?P=q)"""
-)
-_LONG_LITERAL_RE = re.compile(r"""(['"])([A-Za-z0-9+/=_\-]{20,})\1""")
 
 
 class LLMUnavailable(Exception):
@@ -164,7 +157,7 @@ def triage(
         answer = cache.get(key)
         if answer is None:
             try:
-                answer = _ask(finding, context, first_line, config, transport)
+                answer = _ask(finding, context, first_line, config, transport, secrets)
             except LLMNoAnswer as exc:
                 report.reviewed += 1
                 report.warnings.append(
@@ -200,38 +193,19 @@ def _context(ctx: FileContext, finding: Finding, secrets) -> tuple[str, int]:
     func = ctx.enclosing_function(call) if call is not None else None
     if func is not None and (func.end_lineno - func.lineno) <= CONTEXT_LINES * 2:
         start, end = func.lineno, func.end_lineno
-    lines = [f"{n:>5}| {_redact_line(ctx.lines[n - 1], secrets)}" for n in range(start, end + 1)]
+    lines = [
+        f"{n:>5}| {redact_secretish(ctx.lines[n - 1], secrets)}" for n in range(start, end + 1)
+    ]
     return "\n".join(lines), start
 
 
-def _redact_line(line: str, secrets) -> str:
-    line = redact_text(line, secrets, literals=False)
-
-    def assigned(m: re.Match) -> str:
-        if SECRET_NAME_RE.search(m.group("name")):
-            return f"{m.group('name')} = {m.group('q')}{REDACTED}{m.group('q')}"
-        return m.group(0)
-
-    line = _ASSIGN_LITERAL_RE.sub(assigned, line)
-    return _LONG_LITERAL_RE.sub(
-        lambda m: (
-            m.group(0) if _entropy(m.group(2)) < 3.5 else f"{m.group(1)}{REDACTED}{m.group(1)}"
-        ),
-        line,
-    )
-
-
-def _entropy(text: str) -> float:
-    counts = {c: text.count(c) for c in set(text)}
-    return -sum(n / len(text) * math.log2(n / len(text)) for n in counts.values())
-
-
-def _ask(finding, context, first_line, config, transport) -> dict[str, Any] | None:
+def _ask(finding, context, first_line, config, transport, secrets=()) -> dict[str, Any] | None:
     fence = f"CODE-{_secrets.token_hex(8)}"
     user = (
         f"Finding: {finding.rule_id} ({finding.vuln_class}), severity {finding.severity.value}\n"
         f"Message: {finding.message}\n"
-        f"Flagged call at line {finding.location.start_line}: {finding.sink or finding.snippet}\n"
+        f"Flagged call at line {finding.location.start_line}: "
+        f"{redact_secretish(finding.sink or finding.snippet, secrets)}\n"
         f"Fence token: {fence}\n"
         f"<<<{fence}\n{context}\n{fence}>>>\n"
     )
@@ -249,7 +223,10 @@ def _ask(finding, context, first_line, config, transport) -> dict[str, Any] | No
         "options": {"temperature": 0, "seed": 7, "num_predict": MAX_OUTPUT_TOKENS, "num_ctx": 8192},
     }
     reply = transport(config.host.rstrip("/") + "/api/chat", payload, config.timeout)
-    content = (reply.get("message") or {}).get("content", "")
+    message = reply.get("message") if isinstance(reply, dict) else None
+    content = message.get("content", "") if isinstance(message, dict) else None
+    if not isinstance(content, str):
+        return None  # malformed reply shape: discarded like any invalid answer
     if not content.strip():
         raise LLMNoAnswer(str(reply.get("done_reason") or "empty reply"))
     return _validate(content)
@@ -345,15 +322,9 @@ def verify_evidence(ctx: FileContext, finding: Finding, line: int, kind: str) ->
     stmt = next((s for s in func.body if s.lineno == line), None)
     if stmt is None or stmt.end_lineno >= finding.location.start_line:
         return False
-    local = _local_names(func)
-    sink_names = {
-        n.id
-        for a in [*call.args, *(k.value for k in call.keywords)]
-        for n in ast.walk(a)
-        if isinstance(n, ast.Name) and n.id in local
-    }
+    sink_names = _sink_value_names(call)
     if not sink_names:
-        return False
+        return False  # nothing to vouch for, or the sink uses calls/attributes/subscripts
     if kind in {"sanitizer", "constant"}:
         if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
             return False
@@ -372,6 +343,31 @@ def verify_evidence(ctx: FileContext, finding: Finding, line: int, kind: str) ->
     else:
         return False
     return ok and not _rebound_after(func, covered, stmt.end_lineno)
+
+
+def _sink_value_names(call: ast.Call) -> set[str] | None:
+    """Every name the sink's arguments read, or None if they contain anything else that
+    could carry data (calls, attributes, subscripts...). A suppression must vouch for
+    *all* of them: citing `safe = "echo"` cannot excuse `safe + os.getenv("X")`."""
+    names: set[str] = set()
+    allowed = (
+        ast.Constant,
+        ast.Name,
+        ast.Load,
+        ast.BinOp,
+        ast.operator,
+        ast.JoinedStr,
+        ast.FormattedValue,
+        ast.Tuple,
+        ast.List,
+    )
+    for arg in [*call.args, *(k.value for k in call.keywords)]:
+        for node in ast.walk(arg):
+            if not isinstance(node, allowed):
+                return None
+            if isinstance(node, ast.Name):
+                names.add(node.id)
+    return names or None
 
 
 def _local_names(func: ast.AST) -> set[str]:
@@ -482,7 +478,7 @@ def _llm_fix(finding: Finding, replacement: str, ctx: FileContext, rescan) -> Fi
     if not isinstance(expr, ast.Call):
         return None
     call = _call_at(ctx, finding.location)
-    if call is None:
+    if call is None or not _plausible_rewrite(finding.vuln_class, call, expr, ctx):
         return None
     fix = Fix(
         "LLM-suggested rewrite (validated: parses, and the rule no longer fires).",
@@ -510,6 +506,87 @@ def _llm_fix(finding: Finding, replacement: str, ctx: FileContext, rescan) -> Fi
 
 
 # -- cache --------------------------------------------------------------------------------
+
+
+# A rewrite must call a recognized safe API for the class and keep every value the
+# original call used, so "fixes" like print('safe') or __import__('os').system(...) fail.
+SAFE_REWRITES = {
+    "cmdi": {
+        "subprocess.run",
+        "subprocess.call",
+        "subprocess.check_call",
+        "subprocess.check_output",
+        "subprocess.Popen",
+    },
+    "codei": {"ast.literal_eval", "json.loads"},
+    "weak_crypto": {
+        "hashlib.sha256",
+        "hashlib.sha384",
+        "hashlib.sha512",
+        "hashlib.sha3_256",
+        "hashlib.sha3_512",
+        "hashlib.blake2b",
+        "hashlib.blake2s",
+    },
+}
+FORBIDDEN_NAMES = {
+    "__import__",
+    "eval",
+    "exec",
+    "compile",
+    "getattr",
+    "setattr",
+    "globals",
+    "locals",
+    "vars",
+    "open",
+    "system",
+    "popen",
+}
+
+
+def _plausible_rewrite(vuln_class: str, original: ast.Call, new: ast.Call, ctx) -> bool:
+    for node in ast.walk(new):
+        if isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
+            return False
+        if isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_NAMES:
+            return False
+        if isinstance(node, ast.keyword) and node.arg == "shell":
+            return False  # a rewrite may not (re-)enable a shell
+    original_names = {
+        n.id
+        for a in [*original.args, *(k.value for k in original.keywords)]
+        for n in ast.walk(a)
+        if isinstance(n, ast.Name)
+    }
+    new_names = {n.id for n in ast.walk(new) if isinstance(n, ast.Name)}
+    if not original_names <= new_names:
+        return False  # dropped a value: not the same operation
+    func = new.func
+    if vuln_class == "sqli":
+        return (
+            isinstance(func, ast.Attribute)
+            and isinstance(original.func, ast.Attribute)
+            and func.attr == original.func.attr
+            and ast.dump(func.value) == ast.dump(original.func.value)
+            and len(new.args) >= 2  # query plus parameters
+        )
+    allowed = SAFE_REWRITES.get(vuln_class)
+    if not allowed:
+        return False
+    names = {n for n in _dotted(func)}
+    return bool(names & allowed)
+
+
+def _dotted(expr: ast.AST) -> set[str]:
+    parts = []
+    while isinstance(expr, ast.Attribute):
+        parts.append(expr.attr)
+        expr = expr.value
+    if isinstance(expr, ast.Name):
+        parts.append(expr.id)
+        return {".".join(reversed(parts))}
+    return set()
 
 
 def _cache_key(finding: Finding, config: LLMConfig, context: str) -> str:

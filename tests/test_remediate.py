@@ -63,7 +63,6 @@ def test_sqli_fstring_becomes_parameterized_and_is_safe(tmp_path: Path):
             "'SELECT * FROM t WHERE a = ? AND b = ?', (x, y)",
         ),
         ('"SELECT * FROM t WHERE a = " + x', "'SELECT * FROM t WHERE a = ?', (x,)"),
-        ('"SELECT * FROM t WHERE a IN (" + x + ")"', "'SELECT * FROM t WHERE a IN (?)', (x,)"),
         ('f"SELECT * FROM t LIMIT {n}"', "'SELECT * FROM t LIMIT ?', (n,)"),
     ],
 )
@@ -124,7 +123,7 @@ def test_shell_true_drops_shell(tmp_path: Path):
         tmp_path,
         'import subprocess\n\ndef f(name):\n    subprocess.run(f"cat {name}", shell=True, check=True)\n',
     )
-    assert "subprocess.run(['cat', name], check=True)" in new
+    assert "subprocess.run(['cat', str(name)], check=True)" in new  # f-string calls str()
 
 
 @pytest.mark.parametrize(
@@ -234,3 +233,59 @@ def test_apply_edits_rejects_overlaps():
     )
     with pytest.raises(ValueError):
         apply_edits("abcdefghij\n", edits)
+
+
+# -- Codex M4 review regressions -------------------------------------------------------
+
+
+def test_in_list_is_not_parameterized(tmp_path: Path):
+    code = 'import sqlite3\ndef f(cur, ids):\n    cur.execute("SELECT * FROM t WHERE a IN (" + ids + ")")\n'
+    _, findings = fixes_for(tmp_path, code)
+    assert findings and all(f.fix is None for f in findings)
+    db = sqlite3.connect(":memory:")  # why: IN (?) with "1,2" would match nothing
+    db.execute("CREATE TABLE t (a INTEGER)")
+    db.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
+    assert len(db.execute("SELECT * FROM t WHERE a IN (" + "1,2" + ")").fetchall()) == 2
+    assert db.execute("SELECT * FROM t WHERE a IN (?)", ("1,2",)).fetchall() == []
+
+
+def test_fstring_argv_values_are_stringified_and_run(tmp_path: Path):
+    import subprocess
+
+    _, new = fixed_source(tmp_path, 'import os\n\ndef f(n):\n    return os.system(f"echo {n}")\n')
+    assert "subprocess.call(['echo', str(n)])" in new
+    namespace: dict = {}
+    calls = []
+    exec(compile(new, "m.py", "exec"), namespace)
+    namespace["subprocess"] = type(
+        "S", (), {"call": staticmethod(lambda argv: calls.append(argv) or 0)}
+    )
+    namespace["f"](3)  # an int used to raise TypeError inside subprocess
+    assert calls == [["echo", "3"]] and all(isinstance(a, str) for a in calls[0])
+    assert subprocess  # real module untouched
+
+
+def test_import_insertion_keeps_shebang_and_coding_cookie(tmp_path: Path):
+    _, new = fixed_source(
+        tmp_path, "#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\ndef f(s):\n    return eval(s)\n"
+    )
+    lines = new.splitlines()
+    assert lines[0] == "#!/usr/bin/env python3"
+    assert lines[1] == "# -*- coding: utf-8 -*-"
+    assert lines[2] == "import ast"
+
+
+def test_crlf_file_fix_keeps_line_endings(tmp_path: Path):
+    source = "import hashlib\r\n\r\ndef f(d):\r\n    return hashlib.md5(d).hexdigest()\r\n"
+    (tmp_path / "m.py").write_bytes(source.encode())
+    findings = analyze_source(source, "m.py", builtin_plugins()).findings
+    (f,) = generate_fixes(findings, SourceIndex(tmp_path))
+    new = apply_edits(source, f.fix.edits)
+    assert "hashlib.sha256(d)" in new and new.count("\r\n") == source.count("\r\n")
+
+
+def test_multiline_call_fix(tmp_path: Path):
+    code = 'import sqlite3\n\ndef f(cur, uid):\n    cur.execute(\n        f"SELECT * FROM t WHERE id = {uid}"\n    )\n'
+    _, new = fixed_source(tmp_path, code)
+    compile(new, "m.py", "exec")
+    assert "cur.execute('SELECT * FROM t WHERE id = ?', (uid,))" in new
