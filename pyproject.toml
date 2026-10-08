@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.24"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -7,6 +7,8 @@ name = "vulnhawk"
 version = "0.0.1"
 description = "Python SAST orchestrator: own AST + taint engine, imports Semgrep/Bandit/CodeQL/Gitleaks, dedupes, emits SARIF."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "click>=8.1",
