@@ -65,10 +65,12 @@ class CommandInjection(RulePlugin):
         if command is None or is_constant(command):
             return
         if is_dynamic_string(command):
-            yield Match(node, f"Command built from non-constant parts is executed via {via}.")
+            message = f"Command built from non-constant parts is executed via {via}."
+            yield Match(node, message, arg=command)
         else:
             label = ctx.segment(command)
-            yield Match(node, f"Non-constant command `{label}` is executed via {via}.", 50)
+            message = f"Non-constant command `{label}` is executed via {via}."
+            yield Match(node, message, confidence=50, arg=command)
 
 
 def _shell_enabled(call: ast.Call) -> bool:

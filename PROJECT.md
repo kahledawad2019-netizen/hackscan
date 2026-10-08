@@ -40,7 +40,7 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 | `sink` | str | Source text of the sink at `location`, read from the file by the producer; input to the fingerprint (falls back to `snippet` only if empty) |
 | `sources` | list[str] | Provenance: `vulnhawk`, `semgrep`, `codeql`, `gitleaks`, ... |
 | `status` | enum | `candidate`, `confirmed`, `suppressed` |
-| `suppression` | Optional[str] | Reason: `taint:constant_input`, `taint:sanitized`, `llm:false_positive`, `inline:# vulnhawk: ignore` |
+| `suppression` | Optional[str] | Reason: `taint:constant_input`, `taint:sanitized`, `llm:false_positive`, `inline:vulnhawk-ignore` |
 | `confidence` | int 0-100 | Rule-specific; see policy below |
 | `evidence` | list[Evidence] | Taint trace steps, LLM rationale (each tagged with producer) |
 | `fix` | Optional[Fix] | `edits: list[{region, replacement}]` + derived unified diff; only if validated |
@@ -139,7 +139,7 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 |---|---|---|---|
 | M0 ✅ | Skeleton & contracts | Repo, `pyproject`, CI (ruff + pytest on 3.10–3.13), `Finding` models, fixture corpus layout; **frozen** `Finding` schema v1, `taxonomy.py`, fingerprint + dedupe/merge implemented with order-independence tests; importer contract (above) documented | — |
 | M1 ✅ | AST engine & rules | Rules 1–2 pass per-rule vulnerable **and** safe fixtures | M0 |
-| M2 | Taint | Framework fixtures (Flask/Django/FastAPI); constant/sanitized flows suppressed; tests for taint boundaries | M1 |
+| M2 ✅ | Taint | Framework fixtures (Flask/Django/FastAPI); constant/sanitized flows suppressed; tests for taint boundaries | M1 |
 | M3 | CLI, SARIF, importers → **v0.1.0 on PyPI** | `pip install vulnhawk` works on clean venv; SARIF validates against official schema; `--fail-on` exit codes tested | M2 |
 | M4 | LLM + remediation + TUI → v0.2.0 | All LLM tests run against a mocked Ollama; offline degradation tested; prompt-injection fixture | M3 |
 | M5 | Inter-procedural taint, benchmark, GitHub Action → v0.3.0 | Benchmark report in README; Action used on the repo itself | M4 |
@@ -210,3 +210,12 @@ vulnhawk/
   (`plugins/scopes.py`: function/class/global rules; decorators and defaults evaluate in the
   enclosing scope). SQLi requires a DB-looking receiver or SQL text in the literal parts.
   Plugins are type-validated; bad matches and declared source encodings are handled.
+- 2026-10-08 (M2 impl): taint is flow-sensitive within a function — abstract interpretation
+  over statements (branch joins, loop fixpoint, try/except, match, walrus, comprehensions,
+  container mutators) with a `Taint(sources, unknown, safe_for)` lattice. Sinks inside
+  decorators/defaults, lambdas and class bodies are analyzed in their own scopes. Module-level
+  names bound only to constants (and never rebound via `global`) count as constants inside
+  functions — the one deliberate exception to "flow inside one function". Sources: Flask
+  `request.*`, `request`/`req` parameters (Django/DRF/Starlette/FastAPI), route-handler
+  parameters, `input()`, `sys.argv`, `sys.stdin`. Confirmed = +35 confidence with a source
+  trace. Inline suppression reason renamed to `inline:vulnhawk-ignore` (no spaces).

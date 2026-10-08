@@ -75,13 +75,16 @@ class SqlInjection(RulePlugin):
 
         if is_string_formatting(query):
             if db_receiver or has_sql_text(query):
-                yield Match(node, "SQL query is built with string formatting/concatenation.")
+                yield Match(
+                    node, "SQL query is built with string formatting/concatenation.", arg=query
+                )
             return
         if db_receiver:
             yield Match(
                 node,
                 f"Non-constant query `{_short(ctx.segment(query))}` reaches a SQL sink.",
                 confidence=40,
+                arg=query,
             )
 
 

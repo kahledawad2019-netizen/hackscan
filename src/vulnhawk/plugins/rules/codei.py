@@ -42,7 +42,9 @@ class CodeInjection(RulePlugin):
             return
         func = name.rsplit(".", 1)[-1]
         if is_dynamic_string(code):
-            yield Match(node, f"String built from non-constant parts is passed to {func}().")
+            message = f"String built from non-constant parts is passed to {func}()."
+            yield Match(node, message, arg=code)
         else:
             label = ctx.segment(code)
-            yield Match(node, f"Non-constant `{label}` is passed to {func}().", confidence=55)
+            message = f"Non-constant `{label}` is passed to {func}()."
+            yield Match(node, message, confidence=55, arg=code)

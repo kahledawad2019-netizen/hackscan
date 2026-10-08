@@ -10,6 +10,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from vulnhawk.analyzers.suppressions import apply_inline_suppressions
+from vulnhawk.analyzers.taint_pass import apply_taint
 from vulnhawk.core.models import OWN_SOURCE, Evidence, Finding, Region
 from vulnhawk.core.taxonomy import classify
 from vulnhawk.plugins.base import FileContext, Match, RulePlugin
@@ -24,8 +26,11 @@ class FileResult:
     errors: list[str] = field(default_factory=list)
 
 
-def analyze_source(source: str, rel_path: str, plugins: Sequence[RulePlugin]) -> FileResult:
-    """Parse `source` and run every plugin. Parse and plugin errors are reported, not raised."""
+def analyze_source(
+    source: str, rel_path: str, plugins: Sequence[RulePlugin], *, taint: bool = True
+) -> FileResult:
+    """Parse `source`, run every plugin (pass 1), then taint (pass 2) and inline
+    suppressions. Parse and plugin errors are reported, not raised."""
     result = FileResult(path=rel_path)
     try:
         with warnings.catch_warnings():
@@ -42,6 +47,7 @@ def analyze_source(source: str, rel_path: str, plugins: Sequence[RulePlugin]) ->
             by_type.setdefault(node_type, []).append(plugin)
 
     qualnames = _qualnames(tree)
+    candidates: list[tuple[Finding, Match]] = []
     for node in ast.walk(tree):
         for plugin in by_type.get(type(node), ()):
             try:
@@ -52,17 +58,26 @@ def analyze_source(source: str, rel_path: str, plugins: Sequence[RulePlugin]) ->
                 continue
             for match in matches:
                 try:
-                    result.findings.append(_to_finding(match, plugin, ctx, qualnames))
+                    candidates.append((_to_finding(match, plugin, ctx, qualnames), match))
                 except Exception as exc:  # malformed match from a (user) plugin
                     line = getattr(node, "lineno", "?")
                     result.errors.append(
                         f"{rel_path}:{line}: rule {plugin.rule_id} returned a bad match: {exc}"
                     )
-    result.findings.sort(key=Finding.sort_key)
+    findings = [f for f, _ in candidates]
+    if taint:
+        try:
+            findings = apply_taint(ctx, candidates)
+        except RecursionError:  # pathological nesting: keep pass-1 candidates
+            result.errors.append(f"{rel_path}: taint analysis skipped (nesting too deep)")
+    findings = apply_inline_suppressions(findings, ctx)
+    result.findings = sorted(findings, key=Finding.sort_key)
     return result
 
 
-def analyze_file(path: Path, root: Path, plugins: Sequence[RulePlugin]) -> FileResult:
+def analyze_file(
+    path: Path, root: Path, plugins: Sequence[RulePlugin], *, taint: bool = True
+) -> FileResult:
     rel_path = path.relative_to(root).as_posix()
     try:
         data = path.read_bytes()
@@ -71,7 +86,7 @@ def analyze_file(path: Path, root: Path, plugins: Sequence[RulePlugin]) -> FileR
         source = data.decode(encoding)
     except (OSError, SyntaxError, UnicodeDecodeError, LookupError) as exc:
         return FileResult(path=rel_path, errors=[f"{rel_path}: cannot read: {exc}"])
-    return analyze_source(source, rel_path, plugins)
+    return analyze_source(source, rel_path, plugins, taint=taint)
 
 
 def _to_finding(

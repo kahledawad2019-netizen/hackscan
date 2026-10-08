@@ -29,9 +29,12 @@ SQL_KEYWORD_RE = re.compile(
 
 @dataclass(frozen=True)
 class Match:
-    node: ast.AST
+    node: ast.AST  # the sink (reported location)
     message: str
     confidence: int | None = None  # None -> rule default
+    # The value flowing into the sink (e.g. the query argument). When set and the rule's
+    # class is modeled by the taint pass, taint decides confirm/suppress/keep.
+    arg: ast.AST | None = None
 
 
 class RulePlugin(ABC):
