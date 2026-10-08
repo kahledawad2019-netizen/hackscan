@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 import textwrap
 
-from vulnhawk.plugins.base import FileContext
+from hackscan.plugins.base import FileContext
 
 
 def ctx_for(code: str) -> FileContext:

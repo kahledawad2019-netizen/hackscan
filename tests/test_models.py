@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from vulnhawk.core.models import (
+from hackscan.core.models import (
     SCHEMA_VERSION,
     Evidence,
     Finding,

@@ -21,7 +21,7 @@ def no_shell_kwarg(path):
 
 def constant_variable():
     cmd = "uptime"
-    subprocess.call(cmd, shell=True)  # expect-suppressed: VH-CMDI-001 taint:constant_input
+    subprocess.call(cmd, shell=True)  # expect-suppressed: HS-CMDI-001 taint:constant_input
 
 
 def quoted_list(name):

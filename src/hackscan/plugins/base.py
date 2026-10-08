@@ -13,8 +13,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 
-from vulnhawk.core.models import Severity
-from vulnhawk.plugins.scopes import ScopeIndex
+from hackscan.core.models import Severity
+from hackscan.plugins.scopes import ScopeIndex
 
 _NEWLINE_RE = re.compile(r"\r\n|\r|\n")
 

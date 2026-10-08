@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "vulnhawk"
+name = "hackscan"
 version = "0.0.1"
 description = "Python SAST orchestrator: own AST + taint engine, imports Semgrep/Bandit/CodeQL/Gitleaks, dedupes, emits SARIF."
 readme = "README.md"
@@ -20,7 +20,7 @@ classifiers = [
 ]
 
 [project.scripts]
-vulnhawk = "vulnhawk.cli:main"
+hackscan = "hackscan.cli:main"
 
 [dependency-groups]
 dev = [
@@ -29,7 +29,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/vulnhawk"]
+packages = ["src/hackscan"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

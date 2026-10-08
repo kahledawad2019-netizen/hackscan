@@ -1,8 +1,8 @@
-"""Inline suppressions: `# vulnhawk: ignore` or `# vulnhawk: ignore[RULE, ...]`.
+"""Inline suppressions: `# hackscan: ignore` or `# hackscan: ignore[RULE, ...]`.
 
 The comment may sit on any line of the finding's region (start line for single-line
 calls, closing line for multi-line ones). Suppressed findings are kept, with
-`suppression = "inline:vulnhawk-ignore"`.
+`suppression = "inline:hackscan-ignore"`.
 """
 
 from __future__ import annotations
@@ -12,11 +12,11 @@ import re
 import tokenize
 from dataclasses import replace
 
-from vulnhawk.core.models import Evidence, Finding, Status
-from vulnhawk.plugins.base import FileContext
+from hackscan.core.models import Evidence, Finding, Status
+from hackscan.plugins.base import FileContext
 
-INLINE = "inline:vulnhawk-ignore"
-_DIRECTIVE_RE = re.compile(r"#\s*vulnhawk:\s*ignore(?:\[(?P<rules>[^\]]*)\])?", re.IGNORECASE)
+INLINE = "inline:hackscan-ignore"
+_DIRECTIVE_RE = re.compile(r"#\s*hackscan:\s*ignore(?:\[(?P<rules>[^\]]*)\])?", re.IGNORECASE)
 
 
 def directives(source: str) -> dict[int, frozenset[str] | None]:

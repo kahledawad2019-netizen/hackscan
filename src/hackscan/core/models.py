@@ -15,7 +15,7 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 
-OWN_SOURCE = "vulnhawk"
+OWN_SOURCE = "hackscan"
 
 
 class Severity(str, Enum):

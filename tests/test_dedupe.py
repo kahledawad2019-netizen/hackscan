@@ -4,15 +4,15 @@ import itertools
 import random
 from dataclasses import replace
 
-from vulnhawk.core.dedupe import _anchor_clusters, merge_findings
-from vulnhawk.core.fingerprint import assign_ids
-from vulnhawk.core.models import Evidence, Severity, Status
+from hackscan.core.dedupe import _anchor_clusters, merge_findings
+from hackscan.core.fingerprint import assign_ids
+from hackscan.core.models import Evidence, Severity, Status
 
 
 def _cross_tool_sqli(make_finding):
     return [
         make_finding(
-            rule_id="VH-SQLI-001",
+            rule_id="HS-SQLI-001",
             line=10,
             severity=Severity.HIGH,
             confidence=80,
@@ -40,9 +40,9 @@ def _cross_tool_sqli(make_finding):
 
 def test_cross_tool_merge(make_finding):
     (merged,) = merge_findings(_cross_tool_sqli(make_finding))
-    assert merged.rule_id == "VH-SQLI-001"  # own engine is primary
+    assert merged.rule_id == "HS-SQLI-001"  # own engine is primary
     assert merged.related_rules == ("bandit:B608", "semgrep:formatted-sql")
-    assert merged.sources == ("bandit", "semgrep", "vulnhawk")
+    assert merged.sources == ("bandit", "hackscan", "semgrep")
     assert merged.severity is Severity.CRITICAL
     assert merged.confidence == 80
     assert merged.cwe == ("CWE-89",)
@@ -52,7 +52,7 @@ def test_cross_tool_merge(make_finding):
 
 def test_merge_is_order_independent(make_finding):
     findings = _cross_tool_sqli(make_finding) + [
-        make_finding(rule_id="VH-CMDI-001", cwe=(), line=10, snippet="os.system(cmd)"),
+        make_finding(rule_id="HS-CMDI-001", cwe=(), line=10, snippet="os.system(cmd)"),
         make_finding(line=50, snippet="cursor.execute(q)"),
         make_finding(rule_id="semgrep:no-cwe", sources=("semgrep",), cwe=(), line=10),
     ]
@@ -66,7 +66,7 @@ def test_merge_is_order_independent(make_finding):
 def test_no_merge_across_class_path_or_gap(make_finding):
     findings = [
         make_finding(line=10),
-        make_finding(line=10, rule_id="VH-CMDI-001", cwe=()),
+        make_finding(line=10, rule_id="HS-CMDI-001", cwe=()),
         make_finding(line=10, path="other.py"),
         make_finding(line=12),
     ]
@@ -89,7 +89,7 @@ def test_broad_finding_does_not_fuse_distinct_sinks(make_finding):
     ]
     merged = merge_findings(findings)
     assert len(merged) == 2
-    assert [m.sources for m in merged] == [("semgrep", "vulnhawk"), ("vulnhawk",)]
+    assert [m.sources for m in merged] == [("hackscan", "semgrep"), ("hackscan",)]
 
 
 def test_distinct_sinks_on_same_line_stay_separate(make_finding):
@@ -111,7 +111,7 @@ def test_merged_location_covers_all_contributors(make_finding):
         make_finding(line=10, end_line=12, sources=("semgrep",), rule_id="semgrep:x"),
     ]
     (merged,) = merge_findings(findings)
-    assert merged.rule_id == "VH-SQLI-001"
+    assert merged.rule_id == "HS-SQLI-001"
     assert (merged.location.start_line, merged.location.end_line) == (10, 12)
 
 
@@ -151,12 +151,12 @@ def test_status_precedence(make_finding):
             rule_id="semgrep:x",
             sources=("semgrep",),
             status=Status.SUPPRESSED,
-            suppression="inline:# vulnhawk: ignore",
+            suppression="inline:# hackscan: ignore",
         ),
     ]
     (merged,) = merge_findings(all_suppressed)
     assert merged.status is Status.SUPPRESSED
-    assert merged.suppression == "inline:# vulnhawk: ignore;taint:constant_input"
+    assert merged.suppression == "inline:# hackscan: ignore;taint:constant_input"
 
     confirmed = [make_finding(status=Status.CONFIRMED), make_finding(**suppressed)]
     assert merge_findings(confirmed)[0].status is Status.CONFIRMED
@@ -183,7 +183,7 @@ def test_broad_own_engine_finding_does_not_fuse_distinct_sinks(make_finding):
     merged = merge_findings(findings)
     assert len(merged) == 2
     # The own-engine finding still wins primary in the cluster it joined.
-    assert sum("vulnhawk" in m.sources for m in merged) == 1
+    assert sum("hackscan" in m.sources for m in merged) == 1
 
 
 def test_union_with_zero_width_region_covers_all(make_finding):
@@ -212,7 +212,7 @@ def test_randomized_order_independence(make_finding):
     """Random mixes of sources, spans, columns and sinks: output never depends on order."""
     rng = random.Random(1234)
     tools = [
-        ("VH-SQLI-001", ("vulnhawk",)),
+        ("HS-SQLI-001", ("hackscan",)),
         ("semgrep:x", ("semgrep",)),
         ("bandit:B608", ("bandit",)),
     ]
@@ -271,8 +271,8 @@ def test_short_bridge_region_does_not_fuse_distinct_sinks(make_finding):
 
 def test_nested_sinks_from_same_source_stay_separate(make_finding):
     """eval(eval(x)): inner and outer calls overlap but are two findings."""
-    outer = _cols(make_finding(rule_id="VH-CODEI-001", cwe=(), sink="eval(eval(x))"), 5, 18)
-    inner = _cols(make_finding(rule_id="VH-CODEI-001", cwe=(), sink="eval(x)"), 10, 17)
+    outer = _cols(make_finding(rule_id="HS-CODEI-001", cwe=(), sink="eval(eval(x))"), 5, 18)
+    inner = _cols(make_finding(rule_id="HS-CODEI-001", cwe=(), sink="eval(x)"), 10, 17)
     assert len(merge_findings([outer, inner])) == 2
     # A different tool reporting the outer call still merges with one of them.
     tool = _cols(
@@ -285,7 +285,7 @@ def test_nested_sinks_from_same_source_stay_separate(make_finding):
 
 def test_same_source_same_sink_still_merges(make_finding):
     a = make_finding(sink="cursor.execute(q)")
-    b = make_finding(sink="cursor.execute( q )", rule_id="VH-SQLI-002")
+    b = make_finding(sink="cursor.execute( q )", rule_id="HS-SQLI-002")
     assert len(merge_findings([a, b])) == 1
 
 

@@ -1,7 +1,7 @@
 """Canonical vulnerability classes, mapped from rule ids and CWEs.
 
 `vuln_class` is the vendor-independent identity used for fingerprinting and dedupe, so
-the same issue reported by VulnHawk, Semgrep and Bandit lands in the same class.
+the same issue reported by HackScan, Semgrep and Bandit lands in the same class.
 """
 
 from __future__ import annotations
@@ -55,12 +55,12 @@ _RULE_TO_CLASS = {
     "bandit:B107": SECRET,
 }
 
-# Own rules use the VH-<CLASS>-NNN scheme.
+# Own rules use the HS-<CLASS>-NNN scheme.
 _OWN_RULE_PREFIX = {
-    "VH-SQLI-": SQLI,
-    "VH-CMDI-": CMDI,
-    "VH-CODEI-": CODEI,
-    "VH-CRYPTO-": WEAK_CRYPTO,
+    "HS-SQLI-": SQLI,
+    "HS-CMDI-": CMDI,
+    "HS-CODEI-": CODEI,
+    "HS-CRYPTO-": WEAK_CRYPTO,
 }
 
 _CWE_RE = re.compile(r"CWE[-_ ]?(\d+)", re.IGNORECASE)

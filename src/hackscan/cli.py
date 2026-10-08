@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import click
 
-from vulnhawk import __version__
+from hackscan import __version__
 
 
 @click.group()
-@click.version_option(__version__, prog_name="vulnhawk")
+@click.version_option(__version__, prog_name="hackscan")
 def main() -> None:
-    """VulnHawk: Python SAST orchestrator and verifier."""
+    """HackScan: Python SAST orchestrator and verifier."""

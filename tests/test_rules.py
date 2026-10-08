@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from vulnhawk.analyzers.ast_pass import analyze_file
-from vulnhawk.core.models import Status
-from vulnhawk.plugins.loader import builtin_plugins
+from hackscan.analyzers.ast_pass import analyze_file
+from hackscan.core.models import Status
+from hackscan.plugins.loader import builtin_plugins
 
 CORPUS = Path(__file__).parent / "corpus"
 EXPECT_RE = re.compile(r"#\s*expect:\s*(?P<rules>[A-Za-z0-9:_\-.! ]+)")

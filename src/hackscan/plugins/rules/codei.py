@@ -8,8 +8,8 @@ from __future__ import annotations
 import ast
 from collections.abc import Iterable
 
-from vulnhawk.core.models import Severity
-from vulnhawk.plugins.base import (
+from hackscan.core.models import Severity
+from hackscan.plugins.base import (
     FileContext,
     Match,
     RulePlugin,
@@ -24,7 +24,7 @@ CODE_FUNCTIONS = frozenset(
 
 
 class CodeInjection(RulePlugin):
-    rule_id = "VH-CODEI-001"
+    rule_id = "HS-CODEI-001"
     name = "code-injection"
     description = "Non-constant input is evaluated as Python code."
     severity = Severity.HIGH

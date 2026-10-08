@@ -5,15 +5,15 @@ from __future__ import annotations
 import ast
 from collections.abc import Iterable
 
-from vulnhawk.core.models import Severity
-from vulnhawk.plugins.base import FileContext, Match, RulePlugin, first_arg, keyword
+from hackscan.core.models import Severity
+from hackscan.plugins.base import FileContext, Match, RulePlugin, first_arg, keyword
 
 WEAK_ALGORITHMS = frozenset({"md5", "sha1", "md4", "md2"})
 WEAK_CONSTRUCTORS = {f"hashlib.{alg}": alg for alg in WEAK_ALGORITHMS}
 
 
 class WeakHash(RulePlugin):
-    rule_id = "VH-CRYPTO-001"
+    rule_id = "HS-CRYPTO-001"
     name = "weak-hash"
     description = "A cryptographically broken hash (MD5/SHA-1) is used."
     severity = Severity.LOW

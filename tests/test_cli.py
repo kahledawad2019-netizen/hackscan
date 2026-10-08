@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from click.testing import CliRunner
 
-from vulnhawk import __version__
-from vulnhawk.cli import main
+from hackscan import __version__
+from hackscan.cli import main
 
 
 def test_version():

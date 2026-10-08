@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from vulnhawk.core.taxonomy import CMDI, SQLI, TAINT_CLASSES
+from hackscan.core.taxonomy import CMDI, SQLI, TAINT_CLASSES
 
 ALL = TAINT_CLASSES
 

@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from vulnhawk.analyzers.ast_pass import analyze_file, analyze_source
-from vulnhawk.core.dedupe import merge_findings
-from vulnhawk.core.fingerprint import assign_ids
-from vulnhawk.core.models import Severity
-from vulnhawk.plugins.base import Match, RulePlugin
-from vulnhawk.plugins.loader import PluginError, builtin_plugins, load_plugins, resolve_plugins
+from hackscan.analyzers.ast_pass import analyze_file, analyze_source
+from hackscan.core.dedupe import merge_findings
+from hackscan.core.fingerprint import assign_ids
+from hackscan.core.models import Severity
+from hackscan.plugins.base import Match, RulePlugin
+from hackscan.plugins.loader import PluginError, builtin_plugins, load_plugins, resolve_plugins
 
 
 def scan(code: str):
@@ -29,13 +29,13 @@ def test_finding_fields_from_ast():
         """
     )
     (f,) = result.findings
-    assert f.rule_id == "VH-CMDI-001"
+    assert f.rule_id == "HS-CMDI-001"
     assert f.vuln_class == "cmdi"
     assert f.function == "Api.run"
     assert f.sink == 'os.system("ping " + host)'
     assert (f.location.start_line, f.location.start_column) == (6, 9)
     assert f.location.end_column == 9 + len(f.sink)
-    assert f.sources == ("vulnhawk",)
+    assert f.sources == ("hackscan",)
     assert f.evidence[0].producer == "ast"
 
 
@@ -85,7 +85,7 @@ def test_broken_rule_does_not_abort_scan():
             raise RuntimeError("kaboom")
 
     result = analyze_source("eval(x)\n", "a.py", [Boom(), *builtin_plugins()])
-    assert [f.rule_id for f in result.findings] == ["VH-CODEI-001"]
+    assert [f.rule_id for f in result.findings] == ["HS-CODEI-001"]
     assert "X-BOOM failed: kaboom" in result.errors[0]
 
 
@@ -106,8 +106,8 @@ def test_user_plugin_loading(tmp_path: Path):
         textwrap.dedent(
             """
             import ast
-            from vulnhawk.core.models import Severity
-            from vulnhawk.plugins import Match, RulePlugin
+            from hackscan.core.models import Severity
+            from hackscan.plugins import Match, RulePlugin
 
             class PickleLoads(RulePlugin):
                 rule_id = "ACME-PICKLE-001"
@@ -133,11 +133,11 @@ def test_user_plugin_cannot_use_reserved_prefix(tmp_path: Path):
     (tmp_path / "bad.py").write_text(
         textwrap.dedent(
             """
-            from vulnhawk.core.models import Severity
-            from vulnhawk.plugins import RulePlugin
+            from hackscan.core.models import Severity
+            from hackscan.plugins import RulePlugin
 
             class Fake(RulePlugin):
-                rule_id = "VH-FAKE-001"
+                rule_id = "HS-FAKE-001"
                 name = "fake"
                 description = "x"
                 severity = Severity.LOW
@@ -190,14 +190,14 @@ def test_declared_source_encoding_is_honored(tmp_path: Path):
     path.write_bytes("# -*- coding: latin-1 -*-\nx = 'café'\neval(y)\n".encode("latin-1"))
     result = analyze_file(path, tmp_path, builtin_plugins())
     assert not result.errors
-    assert [f.rule_id for f in result.findings] == ["VH-CODEI-001"]
+    assert [f.rule_id for f in result.findings] == ["HS-CODEI-001"]
 
 
 @pytest.mark.parametrize(
     ("body", "message"),
     [
         ("rule_id = ''", "rule_id must be a non-empty string"),
-        ("severity = 'high'", "severity must be a vulnhawk Severity"),
+        ("severity = 'high'", "severity must be a hackscan Severity"),
         ("node_types = ast.Call", "node_types must be a tuple"),
         ("node_types = (str,)", "node_types must be a tuple"),
         ("cwe = 'CWE-1'", "cwe must be a tuple"),
@@ -209,8 +209,8 @@ def test_malformed_plugin_attributes_rejected(tmp_path: Path, body: str, message
         textwrap.dedent(
             f"""
             import ast
-            from vulnhawk.core.models import Severity
-            from vulnhawk.plugins import RulePlugin
+            from hackscan.core.models import Severity
+            from hackscan.plugins import RulePlugin
 
             class P(RulePlugin):
                 rule_id = "ACME-1"
@@ -239,5 +239,5 @@ def test_bad_match_node_is_reported_not_raised():
             yield Match("not a node", "oops")  # type: ignore[arg-type]
 
     result = analyze_source("eval(x)\n", "a.py", [BadMatch(), *builtin_plugins()])
-    assert [f.rule_id for f in result.findings] == ["VH-CODEI-001"]
+    assert [f.rule_id for f in result.findings] == ["HS-CODEI-001"]
     assert "X-BAD returned a bad match" in result.errors[0]

@@ -1,11 +1,11 @@
-# Project: VulnHawk (plan v2)
+# Project: HackScan (plan v2)
 
 > v2 supersedes the Antigravity draft (`~/.gemini/antigravity/scratch/vulnhawk/PROJECT.md`).
 > Changes driven by a Codex + Claude review on 2026-10-08: usable scanner first, LLM optional,
 > reuse mature scanners as inputs/baselines instead of re-implementing them.
 
 ## Positioning
-VulnHawk is a Python SAST **orchestrator + verifier**, not a Semgrep/CodeQL competitor.
+HackScan is a Python SAST **orchestrator + verifier**, not a Semgrep/CodeQL competitor.
 Value = (1) own AST+taint engine for core injection classes, (2) ingest & dedupe findings from
 mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and fix suggestions,
 (5) clean SARIF for GitHub Code Scanning.
@@ -32,15 +32,15 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 |---|---|---|
 | `id` | str | Stable fingerprint: sha256(`vuln_class` + rel_path + enclosing function qualname + normalized sink expression). Vendor-independent, survives line shifts and importer order. |
 | `vuln_class` | enum | Canonical class: `sqli`, `cmdi`, `codei`, `weak_crypto`, `secret`, `other:<cwe>`. Mapped from rule_id/CWE via `core/taxonomy.py`; unmappable imports get `other:<cwe or tool:rule>`. |
-| `rule_id` | str | Primary rule, e.g. `VH-SQLI-001`, or `semgrep:<id>` for imported. All contributing rule ids kept in `related_rules`. |
+| `rule_id` | str | Primary rule, e.g. `HS-SQLI-001`, or `semgrep:<id>` for imported. All contributing rule ids kept in `related_rules`. |
 | `cwe` | list[str] | Used for dedupe and SARIF taxa |
 | `severity` | enum | critical/high/medium/low |
 | `location` | Region | rel path, start/end line+col (1-based lines, 1-based cols per SARIF) |
 | `snippet` | str | Display only; never used for identity |
 | `sink` | str | Source text of the sink at `location`, read from the file by the producer; input to the fingerprint (falls back to `snippet` only if empty) |
-| `sources` | list[str] | Provenance: `vulnhawk`, `semgrep`, `codeql`, `gitleaks`, ... |
+| `sources` | list[str] | Provenance: `hackscan`, `semgrep`, `codeql`, `gitleaks`, ... |
 | `status` | enum | `candidate`, `confirmed`, `suppressed` |
-| `suppression` | Optional[str] | Reason: `taint:constant_input`, `taint:sanitized`, `llm:false_positive`, `inline:vulnhawk-ignore` |
+| `suppression` | Optional[str] | Reason: `taint:constant_input`, `taint:sanitized`, `llm:false_positive`, `inline:hackscan-ignore` |
 | `confidence` | int 0-100 | Rule-specific; see policy below |
 | `evidence` | list[Evidence] | Taint trace steps, LLM rationale (each tagged with producer) |
 | `fix` | Optional[Fix] | `edits: list[{region, replacement}]` + derived unified diff; only if validated |
@@ -117,14 +117,14 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 | 2 | Rule: weak crypto (`md5`/`sha1` in security context) — low severity | M1 |
 | 3 | Plugin ABC + loader (`--plugins <dir>`) | M1 |
 | 4 | Intra-procedural taint + Flask/Django/FastAPI sources + sanitizers | M2 |
-| 5 | Inline suppression `# vulnhawk: ignore[RULE]` | M2 |
-| 6 | `vulnhawk scan <path>` with `--format text|json|sarif`, `--output` | M3 |
+| 5 | Inline suppression `# hackscan: ignore[RULE]` | M2 |
+| 6 | `hackscan scan <path>` with `--format text|json|sarif`, `--output` | M3 |
 | 7 | `--severity`, `--min-confidence`, `--ignore`, `--fail-on`, `--quiet`, `--show-suppressed` | M3 |
-| 8 | `.vulnhawk.yml` hierarchical config | M3 |
+| 8 | `.hackscan.yml` hierarchical config | M3 |
 | 9 | SARIF 2.1.0: rules, locations, snippets, properties, suppressions; `fixes[]` emitted only when `Finding.fix` exists (populated from M4) ; schema-validated in tests | M3 |
 | 10 | Importers (see Importer Behavior): `--with semgrep,bandit,gitleaks` runs tools; `--import <tool>=<file>` ingests BYO reports (CodeQL, any SARIF) | M3 |
 | 11 | Dedupe across sources | M3 |
-| 12 | Packaging (`pyproject.toml`, `vulnhawk` entry point), PyPI release via GitHub Actions trusted publishing | M3 |
+| 12 | Packaging (`pyproject.toml`, `hackscan` entry point), PyPI release via GitHub Actions trusted publishing | M3 |
 | 13 | Ollama triage pass with graceful offline fallback | M4 |
 | 14 | Template + LLM remediation as validated edits; diff view | M4 |
 | 15 | Rich "Matrix" TUI (banner, spinners, tables); auto-off in CI / `--quiet` | M4 |
@@ -140,13 +140,13 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 | M0 ✅ | Skeleton & contracts | Repo, `pyproject`, CI (ruff + pytest on 3.10–3.13), `Finding` models, fixture corpus layout; **frozen** `Finding` schema v1, `taxonomy.py`, fingerprint + dedupe/merge implemented with order-independence tests; importer contract (above) documented | — |
 | M1 ✅ | AST engine & rules | Rules 1–2 pass per-rule vulnerable **and** safe fixtures | M0 |
 | M2 ✅ | Taint | Framework fixtures (Flask/Django/FastAPI); constant/sanitized flows suppressed; tests for taint boundaries | M1 |
-| M3 | CLI, SARIF, importers → **v0.1.0 on PyPI** | `pip install vulnhawk` works on clean venv; SARIF validates against official schema; `--fail-on` exit codes tested | M2 |
+| M3 | CLI, SARIF, importers → **v0.1.0 on PyPI** | `pip install hackscan` works on clean venv; SARIF validates against official schema; `--fail-on` exit codes tested | M2 |
 | M4 | LLM + remediation + TUI → v0.2.0 | All LLM tests run against a mocked Ollama; offline degradation tested; prompt-injection fixture | M3 |
 | M5 | Inter-procedural taint, benchmark, GitHub Action → v0.3.0 | Benchmark report in README; Action used on the repo itself | M4 |
 
 ## Test Strategy
 - Corpus: `tests/corpus/<rule>/{vulnerable,safe}/*.py`, each file annotated with expected findings
-  (`# expect: VH-SQLI-001`) — the test harness diffs actual vs expected (precision/recall per rule).
+  (`# expect: HS-SQLI-001`) — the test harness diffs actual vs expected (precision/recall per rule).
 - Framework cases: `tests/corpus/frameworks/{flask,django,fastapi}/`.
 - Golden SARIF snapshots + JSON-schema validation.
 - CLI tests via Click `CliRunner`: exit codes, filters, formats.
@@ -155,12 +155,12 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 
 ## Code Layout
 ```text
-vulnhawk/
+hackscan/
 ├── pyproject.toml
 ├── README.md
 ├── PROJECT.md
 ├── .github/workflows/{ci.yml,release.yml}
-├── src/vulnhawk/
+├── src/hackscan/
 │   ├── cli.py
 │   ├── config.py
 │   ├── core/{models.py,pipeline.py,dedupe.py,fingerprint.py}
@@ -186,7 +186,7 @@ vulnhawk/
 - Note: `graphify.net` is flagged by Cloudflare as suspected phishing — use the GitHub repo only.
 
 ## Decisions Log
-- 2026-10-08: Repo at `~/teamwork_projects/vulnhawk`. MVP = M0–M3. Secrets via Gitleaks import (own
+- 2026-10-08: Repo at `~/teamwork_projects/hackscan`. MVP = M0–M3. Secrets via Gitleaks import (own
   secrets detector dropped). Auth/IDOR deferred. CodeQL never bundled (license) — BYO SARIF only.
   Semgrep invoked as external CLI; its registry rules are not vendored (Semgrep Rules License).
 - 2026-10-08 (Codex re-review): vendor-independent fingerprint via `vuln_class`; deterministic merge
@@ -196,7 +196,7 @@ vulnhawk/
 - 2026-10-08 (M0 impl): pipeline order is collect → `merge_findings` → `assign_ids` (ids are
   computed on merged findings). Identical sinks in one function get an occurrence suffix (`#n`,
   ordered by line), so inserting an identical sink earlier in the same function shifts later ids —
-  accepted trade-off. Fingerprint ids prefixed `vh1-` (bump if the recipe changes).
+  accepted trade-off. Fingerprint ids prefixed `hs1-` (bump if the recipe changes).
 - 2026-10-08 (Codex M0 code review): anchor-based column-aware clustering (no transitive fusion),
   `sink` field for fingerprints, union locations, evidence concatenation, canonical-JSON tie-breaks,
   end-column validation. Round 2: precision-first anchors, union on effective ends, merged
@@ -218,7 +218,7 @@ vulnhawk/
   functions — the one deliberate exception to "flow inside one function". Sources: Flask
   `request.*`, `request`/`req` parameters (Django/DRF/Starlette/FastAPI), route-handler
   parameters, `input()`, `sys.argv`, `sys.stdin`. Confirmed = +35 confidence with a source
-  trace. Inline suppression reason renamed to `inline:vulnhawk-ignore` (no spaces).
+  trace. Inline suppression reason renamed to `inline:hackscan-ignore` (no spaces).
 - 2026-10-08 (Codex M2 review): fixed five unsound suppressions. Taint values now track
   mutability (a mutable object that is aliased, mutated, passed to an unmodeled call, stored
   elsewhere or captured by a nested scope joins `unknown`), shell-quote context
@@ -242,3 +242,6 @@ vulnhawk/
   `os.system`; any marker reaching a sink the scanner suppressed fails the test. It catches
   every engine version before this one; a 4,500-program stress run checked 6,743 suppressed
   sinks with zero unsound results. M2 closed on this evidence.
+- 2026-10-08: **Renamed VulnHawk → HackScan** (PyPI `vulnhawk` is taken by an unrelated
+  project). Package/CLI `hackscan`, rule ids `HS-*`, fingerprint prefix `hs1-`, inline
+  `# hackscan: ignore`, config `.hackscan.yml`, GitHub repo `hackscan`.

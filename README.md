@@ -1,4 +1,4 @@
-# VulnHawk
+# HackScan
 
 Python SAST orchestrator and verifier.
 

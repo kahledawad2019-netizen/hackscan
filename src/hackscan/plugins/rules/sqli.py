@@ -13,8 +13,8 @@ import ast
 import re
 from collections.abc import Iterable
 
-from vulnhawk.core.models import Severity
-from vulnhawk.plugins.base import (
+from hackscan.core.models import Severity
+from hackscan.plugins.base import (
     FileContext,
     Match,
     RulePlugin,
@@ -53,7 +53,7 @@ _DB_NAME_RE = re.compile(
 
 
 class SqlInjection(RulePlugin):
-    rule_id = "VH-SQLI-001"
+    rule_id = "HS-SQLI-001"
     name = "sql-injection"
     description = "Non-constant SQL is passed to a database execution call."
     severity = Severity.HIGH

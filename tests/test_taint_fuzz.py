@@ -12,9 +12,9 @@ from __future__ import annotations
 import contextlib
 import random
 
-from vulnhawk.analyzers.ast_pass import analyze_source
-from vulnhawk.core.models import Status
-from vulnhawk.plugins.loader import builtin_plugins
+from hackscan.analyzers.ast_pass import analyze_source
+from hackscan.core.models import Status
+from hackscan.plugins.loader import builtin_plugins
 
 MARK = "ATTACKER_MARK"
 N_PROGRAMS = 250

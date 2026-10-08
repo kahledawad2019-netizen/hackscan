@@ -18,7 +18,7 @@ def eval_builtin_constant():
 
 def constant_variable():
     code = "print('hello')"
-    exec(code)  # expect-suppressed: VH-CODEI-001 taint:constant_input
+    exec(code)  # expect-suppressed: HS-CODEI-001 taint:constant_input
 
 
 def shadowed(expr):

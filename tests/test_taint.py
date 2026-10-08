@@ -4,11 +4,11 @@ import textwrap
 
 import pytest
 
-from vulnhawk.analyzers.ast_pass import analyze_source
-from vulnhawk.analyzers.suppressions import INLINE
-from vulnhawk.analyzers.taint_pass import CONSTANT_INPUT, SANITIZED
-from vulnhawk.core.models import Status
-from vulnhawk.plugins.loader import builtin_plugins
+from hackscan.analyzers.ast_pass import analyze_source
+from hackscan.analyzers.suppressions import INLINE
+from hackscan.analyzers.taint_pass import CONSTANT_INPUT, SANITIZED
+from hackscan.core.models import Status
+from hackscan.plugins.loader import builtin_plugins
 
 HEADER = "import os\nimport sys\nimport shlex\nimport subprocess\n"
 
@@ -298,9 +298,9 @@ def test_lambda_class_body_and_decorator_sinks():
         """
     )
     assert [(f.rule_id, f.status) for f in findings] == [
-        ("VH-CMDI-001", Status.CONFIRMED),
-        ("VH-CMDI-001", Status.SUPPRESSED),
-        ("VH-CODEI-001", Status.CONFIRMED),
+        ("HS-CMDI-001", Status.CONFIRMED),
+        ("HS-CMDI-001", Status.SUPPRESSED),
+        ("HS-CODEI-001", Status.CONFIRMED),
     ]
 
 
@@ -333,11 +333,11 @@ def test_weak_crypto_is_never_touched_by_taint():
 @pytest.mark.parametrize(
     ("comment", "suppressed"),
     [
-        ("# vulnhawk: ignore", True),
-        ("# vulnhawk: ignore[VH-CMDI-001]", True),
-        ("# vulnhawk: ignore[VH-SQLI-001, VH-CMDI-001]", True),
-        ("# vulnhawk: ignore[VH-SQLI-001]", False),
-        ("# VulnHawk: Ignore", True),
+        ("# hackscan: ignore", True),
+        ("# hackscan: ignore[HS-CMDI-001]", True),
+        ("# hackscan: ignore[HS-SQLI-001, HS-CMDI-001]", True),
+        ("# hackscan: ignore[HS-SQLI-001]", False),
+        ("# HackScan: Ignore", True),
     ],
 )
 def test_inline_directives(comment: str, suppressed: bool):
@@ -353,14 +353,14 @@ def test_inline_directive_on_closing_line_of_multiline_call():
         def f():
             os.system(
                 input()
-            )  # vulnhawk: ignore
+            )  # hackscan: ignore
         """
     )
     assert f.suppression == INLINE
 
 
 def test_directive_inside_string_does_not_count():
-    (f,) = scan('def f():\n    os.system(input() + "# vulnhawk: ignore")\n')
+    (f,) = scan('def f():\n    os.system(input() + "# hackscan: ignore")\n')
     assert f.status is Status.CONFIRMED
 
 
@@ -544,7 +544,7 @@ NOT_SUPPRESSED_CASES = {
 
 @pytest.mark.parametrize("code", NOT_SUPPRESSED_CASES.values(), ids=NOT_SUPPRESSED_CASES.keys())
 def test_no_unsound_suppression(code: str):
-    findings = [f for f in scan(code) if f.rule_id == "VH-CMDI-001"]
+    findings = [f for f in scan(code) if f.rule_id == "HS-CMDI-001"]
     assert findings
     assert all(f.status is not Status.SUPPRESSED for f in findings), [
         (f.status, f.suppression) for f in findings

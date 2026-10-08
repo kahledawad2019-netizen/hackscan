@@ -4,19 +4,19 @@ from typing import Any
 
 import pytest
 
-from vulnhawk.core.models import Finding, Region, Severity
-from vulnhawk.core.taxonomy import classify
+from hackscan.core.models import Finding, Region, Severity
+from hackscan.core.taxonomy import classify
 
 
 def _make_finding(
     *,
-    rule_id: str = "VH-SQLI-001",
+    rule_id: str = "HS-SQLI-001",
     path: str = "app/db.py",
     line: int = 10,
     end_line: int | None = None,
     snippet: str = 'cursor.execute(f"SELECT * FROM t WHERE id={uid}")',
     function: str | None = "get_user",
-    sources: tuple[str, ...] = ("vulnhawk",),
+    sources: tuple[str, ...] = ("hackscan",),
     cwe: tuple[str, ...] = ("CWE-89",),
     severity: Severity = Severity.HIGH,
     **kwargs: Any,

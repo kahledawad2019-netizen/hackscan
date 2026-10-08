@@ -6,34 +6,34 @@ from sqlalchemy import text
 
 def by_fstring(conn: sqlite3.Connection, user_id):
     cur = conn.cursor()
-    cur.execute(f"SELECT * FROM users WHERE id = {user_id}")  # expect: VH-SQLI-001
+    cur.execute(f"SELECT * FROM users WHERE id = {user_id}")  # expect: HS-SQLI-001
 
 
 def by_percent(cur, name):
-    cur.execute("SELECT * FROM users WHERE name = '%s'" % name)  # expect: VH-SQLI-001
+    cur.execute("SELECT * FROM users WHERE name = '%s'" % name)  # expect: HS-SQLI-001
 
 
 def by_concat(cur, name):
-    cur.execute("SELECT * FROM users WHERE name = '" + name + "'")  # expect: VH-SQLI-001
+    cur.execute("SELECT * FROM users WHERE name = '" + name + "'")  # expect: HS-SQLI-001
 
 
 def by_format(cur, table):
-    cur.executemany("INSERT INTO {} VALUES (?)".format(table), [(1,)])  # expect: VH-SQLI-001
+    cur.executemany("INSERT INTO {} VALUES (?)".format(table), [(1,)])  # expect: HS-SQLI-001
 
 
 def via_variable(cur, email):
     query = "SELECT * FROM users WHERE email = '%s'" % email
-    cur.execute(query)  # expect: VH-SQLI-001
+    cur.execute(query)  # expect: HS-SQLI-001
 
 
 def via_augmented(cur, order):
     query = "SELECT * FROM users"
     query += " ORDER BY " + order
-    cur.execute(query)  # expect: VH-SQLI-001
+    cur.execute(query)  # expect: HS-SQLI-001
 
 
 def multiline(cur, uid):
-    cur.execute(  # expect: VH-SQLI-001
+    cur.execute(  # expect: HS-SQLI-001
         f"""
         SELECT *
         FROM users
@@ -43,44 +43,44 @@ def multiline(cur, uid):
 
 
 def sqlalchemy_text(session, name):
-    return session.execute(text(f"SELECT * FROM t WHERE n = '{name}'"))  # expect: VH-SQLI-001
+    return session.execute(text(f"SELECT * FROM t WHERE n = '{name}'"))  # expect: HS-SQLI-001
 
 
 def pandas_sql(conn, region):
-    return pd.read_sql("SELECT * FROM sales WHERE region = '" + region + "'", conn)  # expect: VH-SQLI-001
+    return pd.read_sql("SELECT * FROM sales WHERE region = '" + region + "'", conn)  # expect: HS-SQLI-001
 
 
 def django_raw(User, username):
-    return User.objects.raw(f"SELECT * FROM auth_user WHERE username = '{username}'")  # expect: VH-SQLI-001
+    return User.objects.raw(f"SELECT * FROM auth_user WHERE username = '{username}'")  # expect: HS-SQLI-001
 
 
 def template_percent(cur, template, user):
-    cur.execute(template % user)  # expect: VH-SQLI-001
+    cur.execute(template % user)  # expect: HS-SQLI-001
 
 
 def template_format(cur, template, user):
-    cur.execute(template.format(user))  # expect: VH-SQLI-001
+    cur.execute(template.format(user))  # expect: HS-SQLI-001
 
 
 def unresolved_variable(cur, query):
-    cur.execute(query)  # expect: VH-SQLI-001
+    cur.execute(query)  # expect: HS-SQLI-001
 
 
 def chained_connect(path, uid):
     import sqlite3
 
-    sqlite3.connect(path).execute("DELETE FROM t WHERE id = " + uid)  # expect: VH-SQLI-001
+    sqlite3.connect(path).execute("DELETE FROM t WHERE id = " + uid)  # expect: HS-SQLI-001
 
 
 def connection_variable(path, query):
     import sqlite3
 
     handle = sqlite3.connect(path)
-    handle.execute(query)  # expect: VH-SQLI-001
+    handle.execute(query)  # expect: HS-SQLI-001
 
 
 MODULE_DB = sqlite3.connect("app.db")
 
 
 def module_level_handle(query):
-    MODULE_DB.execute(query)  # expect: VH-SQLI-001
+    MODULE_DB.execute(query)  # expect: HS-SQLI-001

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import itertools
 
-from vulnhawk.core.fingerprint import ID_PREFIX, assign_ids, normalize_expression
+from hackscan.core.fingerprint import ID_PREFIX, assign_ids, normalize_expression
 
 
 def test_normalize_expression_ignores_formatting_and_comments():
@@ -23,7 +23,7 @@ def test_id_survives_line_shift(make_finding):
 
 
 def test_id_is_vendor_independent(make_finding):
-    (own,) = assign_ids([make_finding(rule_id="VH-SQLI-001")])
+    (own,) = assign_ids([make_finding(rule_id="HS-SQLI-001")])
     (sem,) = assign_ids(
         [make_finding(rule_id="semgrep:formatted-sql", sources=("semgrep",), cwe=("CWE-89",))]
     )
@@ -35,7 +35,7 @@ def test_id_changes_with_identity_fields(make_finding):
     assert assign_ids([make_finding(path="other.py")])[0].id != base
     assert assign_ids([make_finding(function="other_fn")])[0].id != base
     assert assign_ids([make_finding(snippet="cursor.execute(q2)")])[0].id != base
-    assert assign_ids([make_finding(rule_id="VH-CMDI-001", cwe=())])[0].id != base
+    assert assign_ids([make_finding(rule_id="HS-CMDI-001", cwe=())])[0].id != base
 
 
 def test_identical_sinks_get_distinct_ids_independent_of_order(make_finding):

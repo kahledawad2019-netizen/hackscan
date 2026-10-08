@@ -18,9 +18,9 @@ from collections.abc import Iterable
 from dataclasses import replace
 from functools import lru_cache
 
-from vulnhawk.core.models import Finding
+from hackscan.core.models import Finding
 
-ID_PREFIX = "vh1-"  # bump if the fingerprint recipe changes
+ID_PREFIX = "hs1-"  # bump if the fingerprint recipe changes
 _HEX_LEN = 32
 _WS_RE = re.compile(r"\s+")
 

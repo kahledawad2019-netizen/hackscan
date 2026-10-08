@@ -2,4 +2,4 @@ from os import *
 
 
 def run(cmd):
-    system(cmd)  # expect: VH-CMDI-001
+    system(cmd)  # expect: HS-CMDI-001

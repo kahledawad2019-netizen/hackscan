@@ -24,9 +24,9 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import replace
 
-from vulnhawk.core.fingerprint import normalize_expression, sink_text
-from vulnhawk.core.models import OWN_SOURCE, Finding, Region, Status
-from vulnhawk.core.taxonomy import is_mergeable_class, normalize_cwes
+from hackscan.core.fingerprint import normalize_expression, sink_text
+from hackscan.core.models import OWN_SOURCE, Finding, Region, Status
+from hackscan.core.taxonomy import is_mergeable_class, normalize_cwes
 
 
 def merge_findings(findings: Iterable[Finding]) -> list[Finding]:

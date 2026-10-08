@@ -15,7 +15,7 @@ def constant_fstring(cur):
 
 def constant_variable(cur):
     query = "SELECT * FROM users"
-    cur.execute(query)  # expect-suppressed: VH-SQLI-001 taint:constant_input
+    cur.execute(query)  # expect-suppressed: HS-SQLI-001 taint:constant_input
 
 
 def constant_concat(cur):
@@ -38,7 +38,7 @@ def logging_format(log, user):
 def later_constant(cur, user):
     query = "SELECT * FROM users WHERE name = '%s'" % user
     query = "SELECT 1"
-    cur.execute(query)  # expect-suppressed: VH-SQLI-001 taint:constant_input
+    cur.execute(query)  # expect-suppressed: HS-SQLI-001 taint:constant_input
 
 
 def job_runner(executor, user):

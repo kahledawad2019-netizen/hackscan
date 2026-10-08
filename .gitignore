@@ -10,4 +10,4 @@ dist/
 htmlcov/
 *.sarif
 !tests/fixtures/**/*.sarif
-.vulnhawk-cache/
+.hackscan-cache/

@@ -13,12 +13,12 @@ import inspect
 import sys
 from pathlib import Path
 
-from vulnhawk.core.models import Severity
-from vulnhawk.plugins.base import RulePlugin
-from vulnhawk.plugins.rules.cmdi import CommandInjection
-from vulnhawk.plugins.rules.codei import CodeInjection
-from vulnhawk.plugins.rules.sqli import SqlInjection
-from vulnhawk.plugins.rules.weak_crypto import WeakHash
+from hackscan.core.models import Severity
+from hackscan.plugins.base import RulePlugin
+from hackscan.plugins.rules.cmdi import CommandInjection
+from hackscan.plugins.rules.codei import CodeInjection
+from hackscan.plugins.rules.sqli import SqlInjection
+from hackscan.plugins.rules.weak_crypto import WeakHash
 
 BUILTIN_RULES: tuple[type[RulePlugin], ...] = (
     SqlInjection,
@@ -42,7 +42,7 @@ def load_plugins(directory: Path) -> list[RulePlugin]:
         raise PluginError(f"plugin directory not found: {directory}")
     plugins: list[RulePlugin] = []
     for path in sorted(directory.glob("*.py")):
-        module_name = f"vulnhawk_user_plugin_{path.stem}"
+        module_name = f"hackscan_user_plugin_{path.stem}"
         spec = importlib.util.spec_from_file_location(module_name, path)
         if spec is None or spec.loader is None:
             raise PluginError(f"cannot load plugin file: {path}")
@@ -70,7 +70,7 @@ def _validated(plugin: RulePlugin, path: Path) -> RulePlugin:
         if not isinstance(value, str) or not value.strip():
             raise PluginError(f"{path.name}: {cls}.{attr} must be a non-empty string")
     if not isinstance(getattr(plugin, "severity", None), Severity):
-        raise PluginError(f"{path.name}: {cls}.severity must be a vulnhawk Severity")
+        raise PluginError(f"{path.name}: {cls}.severity must be a hackscan Severity")
     node_types = getattr(plugin, "node_types", None)
     if (
         not isinstance(node_types, tuple)
@@ -82,8 +82,8 @@ def _validated(plugin: RulePlugin, path: Path) -> RulePlugin:
         raise PluginError(f"{path.name}: {cls}.cwe must be a tuple of strings")
     if not isinstance(plugin.default_confidence, int) or not 0 <= plugin.default_confidence <= 100:
         raise PluginError(f"{path.name}: {cls}.default_confidence must be an int 0-100")
-    if plugin.rule_id.startswith("VH-"):
-        raise PluginError(f"{path.name}: rule id prefix `VH-` is reserved for built-in rules")
+    if plugin.rule_id.startswith("HS-"):
+        raise PluginError(f"{path.name}: rule id prefix `HS-` is reserved for built-in rules")
     return plugin
 
 

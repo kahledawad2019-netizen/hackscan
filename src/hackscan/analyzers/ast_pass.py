@@ -10,11 +10,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from vulnhawk.analyzers.suppressions import apply_inline_suppressions
-from vulnhawk.analyzers.taint_pass import apply_taint
-from vulnhawk.core.models import OWN_SOURCE, Evidence, Finding, Region
-from vulnhawk.core.taxonomy import classify
-from vulnhawk.plugins.base import FileContext, Match, RulePlugin
+from hackscan.analyzers.suppressions import apply_inline_suppressions
+from hackscan.analyzers.taint_pass import apply_taint
+from hackscan.core.models import OWN_SOURCE, Evidence, Finding, Region
+from hackscan.core.taxonomy import classify
+from hackscan.plugins.base import FileContext, Match, RulePlugin
 
 PRODUCER = "ast"
 

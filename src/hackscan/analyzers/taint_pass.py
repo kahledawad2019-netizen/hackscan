@@ -25,12 +25,12 @@ import ast
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 
-from vulnhawk.core.models import Evidence, Finding, Status
-from vulnhawk.core.taxonomy import CMDI, TAINT_CLASSES
-from vulnhawk.plugins.base import FileContext, Match
-from vulnhawk.plugins.scopes import COMPREHENSION_TYPES, FUNCTION_TYPES
-from vulnhawk.taint.sanitizers import QUOTING_SANITIZERS, SANITIZERS
-from vulnhawk.taint.sources import (
+from hackscan.core.models import Evidence, Finding, Status
+from hackscan.core.taxonomy import CMDI, TAINT_CLASSES
+from hackscan.plugins.base import FileContext, Match
+from hackscan.plugins.scopes import COMPREHENSION_TYPES, FUNCTION_TYPES
+from hackscan.taint.sanitizers import QUOTING_SANITIZERS, SANITIZERS
+from hackscan.taint.sources import (
     REQUEST_PARAM_ATTRS,
     REQUEST_PARAM_NAMES,
     SOURCE_NAMES,

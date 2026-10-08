@@ -9,8 +9,8 @@ from __future__ import annotations
 import ast
 from collections.abc import Iterable
 
-from vulnhawk.core.models import Severity
-from vulnhawk.plugins.base import (
+from hackscan.core.models import Severity
+from hackscan.plugins.base import (
     FileContext,
     Match,
     RulePlugin,
@@ -45,7 +45,7 @@ SUBPROCESS_FUNCTIONS = frozenset(
 
 
 class CommandInjection(RulePlugin):
-    rule_id = "VH-CMDI-001"
+    rule_id = "HS-CMDI-001"
     name = "command-injection"
     description = "A non-constant command string is executed through a system shell."
     severity = Severity.HIGH
