@@ -28,6 +28,12 @@ CONFIG_KEYS = frozenset(
         "plugins",
         "taint",
         "fixes",
+        "llm",
+        "llm-model",
+        "llm-host",
+        "llm-max",
+        "llm-timeout",
+        "llm-suppress",
         "with",
         "import",
         "tool-timeout",
@@ -77,6 +83,13 @@ class HackScanConfig:
     plugins: Path | None = None
     taint: bool = True
     fixes: bool = True  # deterministic template fix suggestions (pass 4)
+    # Pass 3: optional LLM triage via Ollama (opt-in: code leaves the scanner).
+    llm: bool = False
+    llm_model: str = "qwen2.5-coder:7b"
+    llm_host: str = "http://localhost:11434"
+    llm_max: int = 20
+    llm_timeout: int = 60
+    llm_suppress: bool = True
     with_tools: tuple[str, ...] = ()
     imports: tuple[tuple[str, Path], ...] = ()  # (format, report file)
     tool_timeout: int = 300
@@ -143,16 +156,29 @@ def _merge(config: HackScanConfig, data: dict[str, Any], path: Path) -> HackScan
         if not isinstance(value, int) or not 0 <= value <= 100:
             raise err("`min-confidence` must be an integer 0-100")
         values["min_confidence"] = value
-    for key in ("show-suppressed", "taint", "fixes", "strict-tools", "allow-incomplete"):
+    for key in (
+        "show-suppressed",
+        "taint",
+        "fixes",
+        "llm",
+        "llm-suppress",
+        "strict-tools",
+        "allow-incomplete",
+    ):
         if key in data:
             if not isinstance(data[key], bool):
                 raise err(f"`{key}` must be true or false")
             values[key.replace("-", "_")] = data[key]
-    for key in ("tool-timeout", "jobs"):
+    for key in ("tool-timeout", "jobs", "llm-max", "llm-timeout"):
         if key in data:
             if not isinstance(data[key], int) or data[key] < 0:
                 raise err(f"`{key}` must be a non-negative integer")
             values[key.replace("-", "_")] = data[key]
+    for key in ("llm-model", "llm-host"):
+        if key in data:
+            if not isinstance(data[key], str) or not data[key].strip():
+                raise err(f"`{key}` must be a non-empty string")
+            values[key.replace("-", "_")] = data[key].strip()
     if "plugins" in data:
         values["plugins"] = (path.parent / str(data["plugins"])).resolve()
     if "with" in data:

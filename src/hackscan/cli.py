@@ -77,6 +77,19 @@ def main() -> None:
 )
 @click.option("--no-taint", is_flag=True, default=False, help="Skip the taint pass.")
 @click.option("--no-fix", is_flag=True, default=False, help="Do not suggest fixes.")
+@click.option(
+    "--llm", is_flag=True, default=None, help="Triage candidates with a local LLM (Ollama)."
+)
+@click.option("--model", "llm_model", help="Ollama model for --llm.")
+@click.option("--ollama-host", "llm_host", help="Ollama URL (default http://localhost:11434).")
+@click.option("--llm-max", type=click.IntRange(0), help="Max candidates sent to the LLM.")
+@click.option("--llm-timeout", type=click.IntRange(1), help="Seconds per LLM request.")
+@click.option(
+    "--llm-no-suppress",
+    is_flag=True,
+    default=False,
+    help="Let the LLM confirm and annotate, but never suppress.",
+)
 @click.option("--show-fixes", is_flag=True, default=False, help="Print suggested fixes as diffs.")
 @click.option("--jobs", type=click.IntRange(0), help="Worker processes (0 = automatic).")
 @click.option(
@@ -98,6 +111,7 @@ def scan_command(
     sarif_omit_suppressed: bool,
     no_fix: bool,
     show_fixes: bool,
+    llm_no_suppress: bool,
     **options,
 ) -> None:
     """Scan PATH (a directory or a Python file) for vulnerabilities."""
@@ -117,6 +131,12 @@ def scan_command(
             jobs=options["jobs"],
             taint=False if no_taint else None,
             fixes=False if no_fix else None,
+            llm=options["llm"],
+            llm_model=options["llm_model"],
+            llm_host=options["llm_host"],
+            llm_max=options["llm_max"],
+            llm_timeout=options["llm_timeout"],
+            llm_suppress=False if llm_no_suppress else None,
             with_tools=parse_tools(with_tools, click.BadParameter) if with_tools else None,
             imports=_parse_imports(imports) if imports else None,
         )
@@ -319,7 +339,10 @@ def _text(
         if f.snippet:
             lines.append(f"    | {f.snippet.splitlines()[0].strip()}")
         lines.extend(
-            f"    > {e.message}" for e in f.evidence if e.kind in {"taint_step", "taint_verdict"}
+            f"    > {e.message}"
+            for e in f.evidence
+            if e.kind
+            in {"taint_step", "taint_verdict", "llm_rationale", "llm_evidence", "llm_note"}
         )
         if f.sources != (OWN_SOURCE,):
             lines.append(f"    sources: {', '.join(f.sources)}")

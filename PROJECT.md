@@ -270,3 +270,15 @@ hackscan/
   known secrets scrubbed from warnings/errors; `-o` only overwrites previous HackScan
   reports; failed `--import` reports make the scan incomplete (exit 2); `--with` tools
   exiting with an error code are `partial` (warning, fails `--strict-tools`).
+- 2026-10-09 (M4a/M4b): template fixes (parameterized SQL with driver-specific placeholders,
+  argv lists instead of shell strings, `ast.literal_eval`, SHA-256) as validated exact edits;
+  `--no-fix`, `--show-fixes`. LLM triage is **opt-in** (`--llm`): candidates only, JSON-schema
+  replies, per-request random code fence, redacted context, cache, `--llm-max`,
+  `--llm-timeout`, bounded output tokens. LLM suppression requires evidence that a
+  deterministic checker accepts and that holds on every path: a constant or class-valid
+  sanitizer assignment, or an allow-list guard (`not in {consts}`, `assert x in (...)`,
+  `isdigit()/isalnum()`), in the function body before the sink, covering all sink locals,
+  never rebound/mutated afterwards. LLM fixes are kept only if the patched file parses and
+  re-running passes 1-2 shows the finding gone and no new ones. Measured locally: CPU-only
+  Ollama with the reasoning model deepseek-r1:8b ignores `think: false` and exhausts its
+  budget — reported as "no answer"; non-reasoning coder models are recommended.

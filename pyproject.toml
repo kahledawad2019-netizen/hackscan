@@ -64,3 +64,4 @@ Issues = "https://github.com/kahledawad2019-netizen/hackscan/issues"
 [tool.ruff.lint.per-file-ignores]
 # Inline code samples under test are clearer unwrapped.
 "tests/test_remediate.py" = ["E501"]
+"tests/test_llm.py" = ["E501"]

@@ -14,7 +14,8 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hackscan.analyzers.ast_pass import FileResult, analyze_file
+from hackscan.analyzers.ast_pass import FileResult, analyze_file, analyze_source
+from hackscan.analyzers.llm_pass import LLMConfig, default_cache_dir, triage
 from hackscan.analyzers.remediate import generate_fixes
 from hackscan.config import DEFAULT_IGNORES, HackScanConfig
 from hackscan.core.dedupe import merge_findings
@@ -38,6 +39,7 @@ class ScanResult:
     errors: list[str] = field(default_factory=list)  # files we could not analyze
     warnings: list[str] = field(default_factory=list)  # external tool problems
     tool_runs: list[ToolRun] = field(default_factory=list)
+    llm_reviewed: int = 0
 
 
 def scan(target: Path, config: HackScanConfig) -> ScanResult:
@@ -71,13 +73,37 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
     final = assign_ids(redact_findings(merge_findings(findings), external.secrets))
     if config.fixes:
         final = generate_fixes(final, index)
+    warnings = list(external.warnings)
+    llm_reviewed = 0
+    if config.llm:
+        report = triage(
+            final,
+            index,
+            LLMConfig(
+                host=config.llm_host,
+                model=config.llm_model,
+                max_findings=config.llm_max,
+                timeout=config.llm_timeout,
+                allow_suppress=config.llm_suppress,
+                cache_dir=default_cache_dir(),
+            ),
+            secrets=external.secrets,
+            rescan=lambda source, path: (
+                analyze_source(source, path, plugins, taint=config.taint).findings
+            ),
+        )
+        # Model text is untrusted too: redact again before anything is printed.
+        final = redact_findings(report.findings, external.secrets)
+        warnings.extend(report.warnings)
+        llm_reviewed = report.reviewed
     return ScanResult(
         root=root,
         findings=final,
         files_scanned=len(files),
         duration_seconds=time.perf_counter() - started,
         errors=redact_messages([*sorted(errors), *external.errors], external.secrets),
-        warnings=redact_messages(external.warnings, external.secrets),
+        warnings=redact_messages(warnings, external.secrets),
+        llm_reviewed=llm_reviewed,
         tool_runs=external.runs,
     )
 
