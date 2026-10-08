@@ -1,7 +1,10 @@
 """Command-line interface.
 
 Exit codes: 0 = no failing findings, 1 = `--fail-on` threshold hit,
-2 = usage, configuration, plugin or (with `--strict-tools`) external tool error.
+2 = usage, configuration or plugin error, an incomplete scan (a file could not be
+analyzed, unless `--allow-incomplete`), or (with `--strict-tools`) an external tool error.
+An incomplete scan takes precedence over findings: its results cannot be trusted to be
+complete, so it must not look like a pass or an ordinary failure.
 """
 
 from __future__ import annotations
@@ -59,6 +62,18 @@ def main() -> None:
 @click.option(
     "--strict-tools", is_flag=True, default=None, help="Exit 2 if an external tool fails."
 )
+@click.option(
+    "--sarif-omit-suppressed",
+    is_flag=True,
+    default=False,
+    help="Leave suppressed findings out of SARIF (recommended for GitHub uploads).",
+)
+@click.option(
+    "--allow-incomplete",
+    is_flag=True,
+    default=None,
+    help="Do not exit 2 when some files cannot be analyzed (they are still reported).",
+)
 @click.option("--no-taint", is_flag=True, default=False, help="Skip the taint pass.")
 @click.option("--jobs", type=click.IntRange(0), help="Worker processes (0 = automatic).")
 @click.option(
@@ -77,9 +92,12 @@ def scan_command(
     no_taint: bool,
     with_tools: str | None,
     imports: tuple[str, ...],
+    sarif_omit_suppressed: bool,
     **options,
 ) -> None:
     """Scan PATH (a directory or a Python file) for vulnerabilities."""
+    if output is not None:
+        _check_output(output, path)
     try:
         config = load(path, config_path).with_overrides(
             severity=Severity(options["severity"]) if options["severity"] else None,
@@ -90,6 +108,7 @@ def scan_command(
             plugins=options["plugins"].resolve() if options["plugins"] else None,
             tool_timeout=options["tool_timeout"],
             strict_tools=options["strict_tools"],
+            allow_incomplete=options["allow_incomplete"],
             jobs=options["jobs"],
             taint=False if no_taint else None,
             with_tools=parse_tools(with_tools, click.BadParameter) if with_tools else None,
@@ -105,7 +124,8 @@ def scan_command(
         from hackscan.sarif.generator import export_sarif
 
         shown = _visible(result.findings, config, include_suppressed=True)
-        text = json.dumps(export_sarif(_with(result, shown), plugins), indent=2)
+        log = export_sarif(_with(result, shown), plugins, omit_suppressed=sarif_omit_suppressed)
+        text = json.dumps(log, indent=2)
     elif fmt == "json":
         shown = _visible(result.findings, config, config.show_suppressed)
         text = json.dumps(_json(result, shown), indent=2)
@@ -114,12 +134,24 @@ def scan_command(
         text = _text(result, shown, config, quiet)
 
     if output is not None:
-        output.write_text(text + "\n", encoding="utf-8")
+        try:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(text + "\n", encoding="utf-8")
+        except OSError as exc:
+            click.echo(f"hackscan: error: cannot write {output}: {exc}", err=True)
+            sys.exit(EXIT_ERROR)
         if not quiet:
             click.echo(f"hackscan: wrote {fmt} report to {output}", err=True)
     else:
         click.echo(text)
 
+    if result.errors and not config.allow_incomplete:
+        click.echo(
+            f"hackscan: error: scan incomplete, {len(result.errors)} file(s) could not be "
+            "analyzed (see errors above; --allow-incomplete to accept)",
+            err=True,
+        )
+        sys.exit(EXIT_ERROR)
     if config.strict_tools and any(r.status in TOOL_FAILURES for r in result.tool_runs):
         click.echo("hackscan: error: an external tool failed (--strict-tools)", err=True)
         sys.exit(EXIT_ERROR)
@@ -143,6 +175,15 @@ def rules_command(plugins: Path | None) -> None:
 
 
 # -- helpers ------------------------------------------------------------------------------
+
+
+def _check_output(output: Path, target: Path) -> None:
+    """Refuse to overwrite source code: a report must never clobber what it scans."""
+    resolved = output.resolve()
+    target = target.resolve()
+    if resolved.suffix in {".py", ".pyw", ".pyi"} or resolved == target:
+        click.echo(f"hackscan: error: refusing to write the report to {output}", err=True)
+        sys.exit(EXIT_ERROR)
 
 
 def _parse_imports(values: tuple[str, ...]) -> tuple[tuple[str, Path], ...]:
@@ -254,6 +295,8 @@ def _text(result: ScanResult, findings: list[Finding], config: HackScanConfig, q
     if hidden:
         summary += f", {hidden} suppressed hidden (--show-suppressed)"
     lines.append(summary)
+    if result.errors:
+        lines.append(f"INCOMPLETE: {len(result.errors)} file(s) could not be analyzed")
     lines.extend(f"error: {e}" for e in result.errors)
     lines.extend(f"warning: {w}" for w in result.warnings)
     if config.fail_on is not None:

@@ -253,3 +253,15 @@ hackscan/
   tool output; Semgrep/CodeQL/Gitleaks fixtures are hand-written to their documented formats
   (tools unavailable locally). Release via tag-triggered trusted publishing (`release.yml`);
   CI builds the wheel, installs it in a clean venv, and dogfoods `hackscan scan src`.
+- 2026-10-08 (Codex M3 review + stop-gate): incomplete scans (unparseable/unreadable files,
+  crashing rules) exit 2 unless `--allow-incomplete`, and SARIF sets
+  `executionSuccessful: false`; secrets are redacted after merging from every field of every
+  finding (known Gitleaks values everywhere, all string literals for `secret`-class
+  findings); a start column without an end is a point (no rest-of-line widening);
+  imported findings obey default ignores; remote `file://host/` URIs are rejected;
+  `--output` never overwrites source files and creates parent directories; config keys are
+  an explicit allow-list; malformed Gitleaks entries are skipped with a warning; releases
+  require the tagged commit to be on `main`. SARIF URIs are repository-root-relative (GitHub
+  resolves them that way) and URI-escaped; `--sarif-omit-suppressed` for GitHub uploads,
+  since GitHub does not document `suppressions` support and only reads
+  `primaryLocationLineHash` (computed by `upload-sarif`).

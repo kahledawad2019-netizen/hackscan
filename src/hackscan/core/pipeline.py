@@ -19,6 +19,7 @@ from hackscan.config import DEFAULT_IGNORES, HackScanConfig
 from hackscan.core.dedupe import merge_findings
 from hackscan.core.fingerprint import assign_ids
 from hackscan.core.models import Finding
+from hackscan.core.redact import redact_findings
 from hackscan.importers.common import SourceIndex
 from hackscan.importers.runner import ToolRun, collect
 from hackscan.plugins.base import RulePlugin
@@ -60,10 +61,12 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
         config.tool_timeout,
         SourceIndex(root),
     )
-    ignored = {f for f in external.findings if _is_ignored(f.location.path, config.ignore)}
-    findings.extend(f for f in external.findings if f not in ignored)
+    # Imported findings obey the same ignores as discovery (defaults included).
+    findings.extend(
+        f for f in external.findings if not is_ignored_path(f.location.path, config.ignore)
+    )
 
-    final = assign_ids(merge_findings(findings))
+    final = assign_ids(redact_findings(merge_findings(findings), external.secrets))
     return ScanResult(
         root=root,
         findings=final,
@@ -98,6 +101,15 @@ def discover_files(target: Path, root: Path, ignore: tuple[str, ...]) -> Iterato
             rel = f"{rel_dir}/{name}" if rel_dir != "." else name
             if not _is_ignored(rel, ignore):
                 yield current / name
+
+
+def is_ignored_path(rel_path: str, patterns: tuple[str, ...]) -> bool:
+    """Whether a file path is excluded: any directory component matching a default ignore
+    (`.venv`, `node_modules`, ...) or a configured pattern."""
+    parts = rel_path.split("/")
+    if any(fnmatch.fnmatch(part, p) for part in parts[:-1] for p in DEFAULT_IGNORES):
+        return True
+    return _is_ignored(rel_path, patterns)
 
 
 def _is_ignored(rel_path: str, patterns: tuple[str, ...], is_dir: bool = False) -> bool:

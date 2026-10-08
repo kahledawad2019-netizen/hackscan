@@ -113,8 +113,10 @@ def test_make_region_normalization():
     assert (r.start_line, r.end_line, r.start_column, r.end_column) == (5, 5, 1, None)
     r = make_region("a.py", 0, 0, 0, 0)
     assert (r.start_line, r.start_column, r.end_column) == (1, 1, None)
-    r = make_region("a.py", 3, 10, 3, 4)  # reversed columns -> whole line end
-    assert r.end_column is None
+    r = make_region("a.py", 3, 10, 3, 4)  # reversed columns -> point at start
+    assert r.end_column == 10
+    r = make_region("a.py", 3, 10)  # start column but no end -> point, not rest of line
+    assert (r.end_line, r.end_column) == (3, 10)
 
 
 def test_missing_tool_is_a_warning_not_an_error(monkeypatch):
@@ -156,3 +158,116 @@ def test_cross_tool_dedupe_in_full_scan():
     secrets = by_class["secret"]
     assert {s for f in secrets for s in f.sources} == {"bandit", "gitleaks"}
     assert len({f.id for f in result.findings}) == len(result.findings)
+
+
+# -- Codex M3 review regressions ------------------------------------------------------------
+
+SECRET = "hackscan-fake-token-0123456789"
+
+
+def _project_scan(**kwargs):
+    imports = (
+        ("bandit", FIXTURES / "bandit.sarif"),
+        ("gitleaks", FIXTURES / "gitleaks.json"),
+    )
+    return scan(PROJECT, HackScanConfig(imports=kwargs.get("imports", imports)))
+
+
+def test_secret_never_leaks_after_merge_with_bandit():
+    from hackscan.plugins.loader import builtin_plugins
+    from hackscan.sarif.generator import export_sarif
+
+    result = _project_scan()
+    assert SECRET not in json.dumps([f.to_dict() for f in result.findings])
+    assert SECRET not in json.dumps(export_sarif(result, builtin_plugins()))
+
+
+def test_secret_class_literals_redacted_without_gitleaks():
+    result = _project_scan(imports=(("bandit", FIXTURES / "bandit.sarif"),))
+    secrets = [f for f in result.findings if f.vuln_class == "secret"]
+    assert secrets
+    assert SECRET not in json.dumps([f.to_dict() for f in secrets])
+
+
+def test_column_points_from_different_tools_do_not_merge(tmp_path):
+    from hackscan.core.dedupe import merge_findings
+
+    (tmp_path / "a.py").write_text("import os\nos.system(a); os.system(b)\n")
+    index = SourceIndex(tmp_path)
+
+    def sarif(tool, col):
+        return {
+            "runs": [
+                {
+                    "tool": {
+                        "driver": {
+                            "name": tool,
+                            "rules": [{"id": "r", "properties": {"tags": ["CWE-78"]}}],
+                        }
+                    },
+                    "results": [
+                        {
+                            "ruleId": "r",
+                            "locations": [
+                                {
+                                    "physicalLocation": {
+                                        "artifactLocation": {"uri": "a.py"},
+                                        "region": {"startLine": 2, "startColumn": col},
+                                    }
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+
+    a = import_sarif(sarif("Semgrep OSS", 1), tmp_path, index).findings
+    b = import_sarif(sarif("CodeQL", 15), tmp_path, index).findings
+    assert len(merge_findings([*a, *b])) == 2
+
+
+def test_imported_findings_obey_default_ignores(tmp_path):
+    (tmp_path / ".venv" / "lib").mkdir(parents=True)
+    (tmp_path / "app.py").write_text("x = 1\n")
+    report = tmp_path / "r.sarif"
+    report.write_text(
+        json.dumps(
+            {
+                "runs": [
+                    {
+                        "tool": {"driver": {"name": "Semgrep OSS"}},
+                        "results": [
+                            {
+                                "ruleId": "r",
+                                "message": {"text": "m"},
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": ".venv/lib/a.py"},
+                                            "region": {"startLine": 1},
+                                        }
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    result = scan(tmp_path, HackScanConfig(imports=(("semgrep", report),)))
+    assert result.findings == []
+
+
+def test_remote_file_uri_is_rejected(tmp_path):
+    assert normalize_path("file://remote-host/share/app.py", tmp_path) is None
+    assert normalize_path(f"file://localhost{(tmp_path / 'a.py').as_uri()[7:]}", tmp_path) == "a.py"
+
+
+def test_malformed_gitleaks_entry_is_skipped():
+    items = load_gitleaks(FIXTURES / "gitleaks.json")
+    items.append({**items[0], "StartLine": "n/a"})
+    result = import_gitleaks(items, PROJECT, SourceIndex(PROJECT))
+    assert len(result.findings) == 1
+    assert any("malformed" in w for w in result.warnings)

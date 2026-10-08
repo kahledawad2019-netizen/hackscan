@@ -31,10 +31,12 @@ class ExternalResults:
     findings: list = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     runs: list[ToolRun] = field(default_factory=list)
+    secrets: set[str] = field(default_factory=set)
 
     def add(self, result: ImportResult, run: ToolRun) -> None:
         self.findings.extend(result.findings)
         self.warnings.extend(result.warnings)
+        self.secrets |= result.secrets
         run.findings = len(result.findings)
         self.runs.append(run)
 

@@ -7,7 +7,7 @@ scan root is loaded and merged, nearer files overriding farther ones (lists such
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,25 @@ import yaml
 from hackscan.core.models import Severity
 
 CONFIG_NAME = ".hackscan.yml"
+# Keys accepted in .hackscan.yml (and only these: anything else is an error, so a typo
+# never silently disables a setting).
+CONFIG_KEYS = frozenset(
+    {
+        "ignore",
+        "severity",
+        "min-confidence",
+        "fail-on",
+        "show-suppressed",
+        "plugins",
+        "taint",
+        "with",
+        "import",
+        "tool-timeout",
+        "strict-tools",
+        "allow-incomplete",
+        "jobs",
+    }
+)
 
 DEFAULT_IGNORES = (
     ".git",
@@ -60,6 +79,7 @@ class HackScanConfig:
     imports: tuple[tuple[str, Path], ...] = ()  # (format, report file)
     tool_timeout: int = 300
     strict_tools: bool = False
+    allow_incomplete: bool = False  # files that cannot be analyzed do not fail the run
     jobs: int = 0  # 0 = automatic
     sources: tuple[Path, ...] = field(default=(), compare=False)  # config files loaded
 
@@ -93,8 +113,7 @@ def _parse(path: Path) -> dict[str, Any]:
         raise ConfigError(f"{path}: cannot read config: {exc}") from exc
     if not isinstance(data, dict):
         raise ConfigError(f"{path}: top level must be a mapping")
-    known = {f.name.replace("_", "-") for f in fields(HackScanConfig)} | {"with", "import"}
-    unknown = sorted(set(data) - known)
+    unknown = sorted(set(data) - CONFIG_KEYS)
     if unknown:
         raise ConfigError(f"{path}: unknown option(s): {', '.join(unknown)}")
     return data
@@ -122,7 +141,7 @@ def _merge(config: HackScanConfig, data: dict[str, Any], path: Path) -> HackScan
         if not isinstance(value, int) or not 0 <= value <= 100:
             raise err("`min-confidence` must be an integer 0-100")
         values["min_confidence"] = value
-    for key in ("show-suppressed", "taint", "strict-tools"):
+    for key in ("show-suppressed", "taint", "strict-tools", "allow-incomplete"):
         if key in data:
             if not isinstance(data[key], bool):
                 raise err(f"`{key}` must be true or false")

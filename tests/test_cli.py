@@ -174,3 +174,62 @@ def test_parallel_and_serial_scans_agree():
     serial = json.loads(run("scan", str(CORPUS), "--format", "json", "--jobs", "1").output)
     parallel = json.loads(run("scan", str(CORPUS), "--format", "json", "--jobs", "2").output)
     assert serial["findings"] == parallel["findings"]
+
+
+def test_incomplete_scan_exits_2_and_is_marked(tmp_path: Path):
+    (tmp_path / "ok.py").write_text("x = 1\n")
+    (tmp_path / "broken.py").write_text("def x(:\n")
+    result = run("scan", str(tmp_path))
+    assert result.exit_code == 2
+    assert "INCOMPLETE" in result.output and "broken.py" in result.output
+    # Incomplete wins over --fail-on findings: the result is not a trustworthy verdict.
+    (tmp_path / "vuln.py").write_text("eval(input())\n")
+    assert run("scan", str(tmp_path), "--fail-on", "low").exit_code == 2
+    assert run("scan", str(tmp_path), "--allow-incomplete").exit_code == 0
+    assert run("scan", str(tmp_path), "--allow-incomplete", "--fail-on", "low").exit_code == 1
+
+
+def test_incomplete_scan_sarif_execution_unsuccessful(tmp_path: Path):
+    (tmp_path / "broken.py").write_text("def x(:\n")
+    out = tmp_path / "r.sarif"
+    run("scan", str(tmp_path), "--format", "sarif", "-o", str(out), "--allow-incomplete")
+    invocation = json.loads(out.read_text(encoding="utf-8"))["runs"][0]["invocations"][0]
+    assert invocation["executionSuccessful"] is False
+    assert any(
+        "broken.py" in n["message"]["text"] for n in invocation["toolExecutionNotifications"]
+    )
+
+
+def test_allow_incomplete_from_config(tmp_path: Path):
+    (tmp_path / ".hackscan.yml").write_text("allow-incomplete: true\n")
+    (tmp_path / "broken.py").write_text("def x(:\n")
+    assert run("scan", str(tmp_path)).exit_code == 0
+
+
+def test_output_refuses_to_overwrite_source(tmp_path: Path):
+    target = tmp_path / "app.py"
+    target.write_text("eval(input())\n")
+    result = run("scan", str(target), "-o", str(target))
+    assert result.exit_code == 2
+    assert target.read_text() == "eval(input())\n"
+    assert run("scan", str(tmp_path), "-o", str(tmp_path / "other.py")).exit_code == 2
+
+
+def test_output_creates_parent_directories(tmp_path: Path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    out = tmp_path / "reports" / "deep" / "r.json"
+    assert run("scan", str(tmp_path), "--format", "json", "-o", str(out)).exit_code == 0
+    assert out.is_file()
+
+
+def test_sarif_omit_suppressed(tmp_path: Path):
+    out = tmp_path / "r.sarif"
+    run("scan", str(FRAMEWORKS), "--format", "sarif", "--sarif-omit-suppressed", "-o", str(out))
+    results = json.loads(out.read_text(encoding="utf-8"))["runs"][0]["results"]
+    assert results and not any(r.get("suppressions") for r in results)
+
+
+def test_config_rejects_field_style_keys(tmp_path: Path):
+    (tmp_path / ".hackscan.yml").write_text("with-tools: [gitleaks]\n")
+    result = run("scan", str(tmp_path))
+    assert result.exit_code == 2 and "unknown option" in result.output

@@ -92,3 +92,25 @@ def test_sarif_is_deterministic():
     a = export_sarif(scan(CORPUS, HackScanConfig()), builtin_plugins())
     b = export_sarif(scan(CORPUS, HackScanConfig(jobs=2)), builtin_plugins())
     assert a["runs"][0]["results"] == b["runs"][0]["results"]
+
+
+def test_uris_are_escaped_and_relative_to_repository_root(tmp_path: Path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    pkg = repo / "src" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "a#b c.py").write_text("eval(input())\n")
+    result = scan(repo / "src", HackScanConfig())
+    log = export_sarif(result, builtin_plugins())
+    validate(log)
+    run = log["runs"][0]
+    uri = run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+    assert uri == "src/pkg/a%23b%20c.py"  # repo-relative, URI-escaped
+    assert run["originalUriBaseIds"]["%SRCROOT%"]["uri"] == repo.resolve().as_uri() + "/"
+
+
+def test_omit_suppressed_drops_results(corpus_log):
+    result, log = corpus_log
+    omitted = export_sarif(result, builtin_plugins(), omit_suppressed=True)
+    kept = [r for r in log["runs"][0]["results"] if not r.get("suppressions")]
+    assert omitted["runs"][0]["results"] == kept

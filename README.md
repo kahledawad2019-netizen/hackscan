@@ -51,10 +51,14 @@ hackscan rules                                    # list rules
 | `--ignore GLOB` | Skip paths (`tests/*`, `**/migrations/**`, `legacy`). `.venv`, `node_modules`, `build`, ... are always skipped. |
 | `--with TOOLS` / `--import FMT=FILE` | Run external tools / import reports (`sarif`, `semgrep`, `bandit`, `codeql`, `gitleaks`). A missing or failing tool is a warning unless `--strict-tools`. |
 | `--plugins DIR` | Load custom rules (see below). |
+| `--allow-incomplete` | Do not exit 2 when some files cannot be analyzed (they are still listed). |
 | `--no-taint` | Pattern matching only. |
 | `--jobs N` | Worker processes (default: automatic). |
 
-Exit codes: `0` OK, `1` `--fail-on` threshold reached, `2` usage/config/plugin error.
+Exit codes: `0` OK, `1` `--fail-on` threshold reached, `2` usage/config/plugin error or
+an **incomplete scan** (a file could not be parsed or read; use `--allow-incomplete` to
+accept). An incomplete scan is never reported as a pass, and SARIF marks it with
+`executionSuccessful: false`.
 
 ### Configuration
 
@@ -117,7 +121,7 @@ class PickleLoads(RulePlugin):
 
 ```yaml
 - run: pipx install hackscan
-- run: hackscan scan . --format sarif -o hackscan.sarif --fail-on high
+- run: hackscan scan . --format sarif --sarif-omit-suppressed -o hackscan.sarif --fail-on high
 - uses: github/codeql-action/upload-sarif@v3
   if: always()
   with:

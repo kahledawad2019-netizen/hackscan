@@ -30,12 +30,15 @@ class ImportResult:
     tool: str
     findings: list = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    secrets: set[str] = field(default_factory=set)  # values to redact from all output
 
 
 def normalize_path(raw: str, root: Path, base_uri: str | None = None) -> str | None:
     """Tool-reported path/URI -> POSIX path relative to `root`, or None if outside it."""
     if raw.startswith("file:"):
         parsed = urlparse(raw)
+        if parsed.netloc not in ("", "localhost"):
+            return None  # file://other-host/share/... is not a local path
         raw = unquote(parsed.path)
         if len(raw) >= 3 and raw[0] == "/" and raw[2] == ":":  # file:///C:/x -> C:/x
             raw = raw[1:]
@@ -62,16 +65,22 @@ def make_region(
     end_line: int | None = None,
     end_column: int | None = None,
 ) -> Region:
-    """Region with the importer normalization rules: missing end -> start line; missing
-    column -> whole line; invalid values are clamped rather than rejected."""
+    """Region with the importer normalization rules (PROJECT.md):
+    - missing end line -> start line; missing end column -> same as start (a point),
+      so a column-precise report never silently widens to the rest of the line;
+    - missing start column -> whole line;
+    - invalid values are clamped rather than rejected (non-numbers raise ValueError).
+    """
     line = max(1, int(start_line or 1))
     end = max(line, int(end_line or line))
-    col = int(start_column) if start_column and start_column > 0 else 1
-    end_col = int(end_column) if end_column and end_column > 0 else None
-    if start_column is None or start_column <= 0:
+    col = int(start_column) if start_column and int(start_column) > 0 else 1
+    end_col = int(end_column) if end_column and int(end_column) > 0 else None
+    if start_column is None or int(start_column) <= 0:
         end_col = None  # whole line
+    elif end_col is None and end == line:
+        end_col = col  # point at the reported start
     if end_col is not None and end == line and end_col < col:
-        end_col = None
+        end_col = col
     return Region(path=path, start_line=line, start_column=col, end_line=end, end_column=end_col)
 
 

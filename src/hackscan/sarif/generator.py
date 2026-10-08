@@ -3,14 +3,22 @@
 - One run, tool driver `HackScan` with a `reportingDescriptor` per rule that occurs.
 - Every finding is emitted, including suppressed ones (with `suppressions[]`), so code
   scanning platforms can show them as dismissed rather than losing them.
-- `partialFingerprints["hackscan/v1"]` carries the stable finding id.
+- `partialFingerprints["hackscan/v1"]` carries the stable finding id. (GitHub code
+  scanning only reads `primaryLocationLineHash`, which `upload-sarif` computes itself.)
+- Artifact URIs are relative to the repository root when the scan root is inside a git
+  work tree (GitHub resolves them that way), otherwise to the scan root; URI-escaped.
+- GitHub does not document support for `suppressions`, so a suppressed result would
+  still become an alert there: pass `omit_suppressed=True` (`--sarif-omit-suppressed`)
+  for uploads, keep them (default) for audit trails.
 - Columns are Unicode code points (`columnKind`), matching the engine's char columns.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from hackscan import __version__
 from hackscan.core.models import Finding, Severity, Status
@@ -37,9 +45,16 @@ SECURITY_SEVERITY = {
 }
 
 
-def export_sarif(result: ScanResult, plugins: Iterable[RulePlugin] = ()) -> dict[str, Any]:
+def export_sarif(
+    result: ScanResult, plugins: Iterable[RulePlugin] = (), *, omit_suppressed: bool = False
+) -> dict[str, Any]:
     by_id = {p.rule_id: p for p in plugins}
     findings = sorted(result.findings, key=Finding.sort_key)
+    if omit_suppressed:
+        findings = [f for f in findings if f.status is not Status.SUPPRESSED]
+    base = repository_root(result.root) or result.root.resolve()
+    prefix = result.root.resolve().relative_to(base).as_posix()
+    prefix = "" if prefix == "." else prefix + "/"
     rule_ids = sorted({f.rule_id for f in findings})
     rule_index = {rule_id: i for i, rule_id in enumerate(rule_ids)}
     rules = [_rule(rule_id, by_id.get(rule_id), findings) for rule_id in rule_ids]
@@ -60,15 +75,17 @@ def export_sarif(result: ScanResult, plugins: Iterable[RulePlugin] = ()) -> dict
                         "rules": rules,
                     }
                 },
-                "originalUriBaseIds": {SRCROOT: {"uri": result.root.resolve().as_uri() + "/"}},
+                "originalUriBaseIds": {SRCROOT: {"uri": base.as_uri() + "/"}},
                 "columnKind": "unicodeCodePoints",
                 "invocations": [
                     {
-                        "executionSuccessful": True,
+                        # False when some files could not be analyzed: results are
+                        # incomplete (errors are listed as notifications).
+                        "executionSuccessful": not result.errors,
                         "toolExecutionNotifications": notifications,
                     }
                 ],
-                "results": [_result(f, rule_index[f.rule_id]) for f in findings],
+                "results": [_result(f, rule_index[f.rule_id], prefix) for f in findings],
             }
         ],
     }
@@ -96,13 +113,14 @@ def _rule(rule_id: str, plugin: RulePlugin | None, findings: list[Finding]) -> d
     }
 
 
-def _result(f: Finding, index: int) -> dict[str, Any]:
+def _result(f: Finding, index: int, prefix: str) -> dict[str, Any]:
+    uri = _uri(prefix + f.location.path)
     out: dict[str, Any] = {
         "ruleId": f.rule_id,
         "ruleIndex": index,
         "level": LEVEL[f.severity],
         "message": {"text": f.message},
-        "locations": [{"physicalLocation": _physical(f)}],
+        "locations": [{"physicalLocation": _physical(f, uri)}],
         "partialFingerprints": {FINGERPRINT_KEY: f.id},
         "properties": {
             "severity": f.severity.value,
@@ -133,7 +151,7 @@ def _result(f: Finding, index: int) -> dict[str, Any]:
                 "description": {"text": f.fix.description},
                 "artifactChanges": [
                     {
-                        "artifactLocation": {"uri": f.location.path, "uriBaseId": SRCROOT},
+                        "artifactLocation": {"uri": uri, "uriBaseId": SRCROOT},
                         "replacements": [
                             {
                                 "deletedRegion": _region(edit.region),
@@ -148,12 +166,12 @@ def _result(f: Finding, index: int) -> dict[str, Any]:
     return out
 
 
-def _physical(f: Finding) -> dict[str, Any]:
+def _physical(f: Finding, uri: str) -> dict[str, Any]:
     region = _region(f.location)
     if f.snippet:
         region["snippet"] = {"text": f.snippet}
     return {
-        "artifactLocation": {"uri": f.location.path, "uriBaseId": SRCROOT},
+        "artifactLocation": {"uri": uri, "uriBaseId": SRCROOT},
         "region": region,
     }
 
@@ -167,6 +185,19 @@ def _region(r) -> dict[str, Any]:
     if r.end_column is not None:
         region["endColumn"] = r.end_column
     return region
+
+
+def _uri(path: str) -> str:
+    return quote(path, safe="/-_.~")
+
+
+def repository_root(start: Path) -> Path | None:
+    """Nearest enclosing directory containing `.git` (a work tree), if any."""
+    current = start.resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
 
 
 def _pascal(name: str) -> str:
