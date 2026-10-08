@@ -33,9 +33,10 @@ class CodeInjection(RulePlugin):
 
     def check(self, node: ast.AST, ctx: FileContext) -> Iterable[Match]:
         assert isinstance(node, ast.Call)
-        name = ctx.call_name(node)
-        if name not in CODE_FUNCTIONS:
+        matched = sorted(ctx.call_names(node) & CODE_FUNCTIONS)
+        if not matched:
             return
+        name = matched[0]
         code = first_arg(node, "source")
         if code is None or is_constant(code):
             return

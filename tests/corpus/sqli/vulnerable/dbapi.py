@@ -70,3 +70,10 @@ def chained_connect(path, uid):
     import sqlite3
 
     sqlite3.connect(path).execute("DELETE FROM t WHERE id = " + uid)  # expect: VH-SQLI-001
+
+
+def connection_variable(path, query):
+    import sqlite3
+
+    handle = sqlite3.connect(path)
+    handle.execute(query)  # expect: VH-SQLI-001

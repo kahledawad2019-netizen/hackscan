@@ -123,3 +123,149 @@ def test_decorators_and_defaults_belong_to_enclosing_scope():
         if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "eval"
     }
     assert funcs == {"eval(src)": "outer", "eval(x)": "inner"}
+
+
+def all_names(ctx: FileContext) -> dict[str, frozenset[str]]:
+    return {
+        ctx.segment(n): ctx.call_names(n) for n in ast.walk(ctx.tree) if isinstance(n, ast.Call)
+    }
+
+
+def test_module_level_global_does_not_hang():
+    ctx = ctx_for(
+        """
+        global os
+        import os
+        os.system(cmd)
+        """
+    )
+    assert calls(ctx)["os.system(cmd)"] == "os.system"
+
+
+def test_comprehension_targets_do_not_leak():
+    ctx = ctx_for(
+        """
+        import os
+        [os.system(a) for os in items]
+        os.system(b)
+        """
+    )
+    resolved = calls(ctx)
+    assert resolved["os.system(a)"] is None
+    assert resolved["os.system(b)"] == "os.system"
+
+
+def test_comprehension_in_class_does_not_see_class_bindings():
+    ctx = ctx_for(
+        """
+        import os
+
+        class C:
+            os = None
+            items = [os.system(x) for x in range(3)]
+        """
+    )
+    assert calls(ctx)["os.system(x)"] == "os.system"
+
+
+def test_comprehension_first_iterable_uses_enclosing_scope():
+    ctx = ctx_for(
+        """
+        import os
+
+        class C:
+            os = None
+            items = [x for x in os.listdir(p)]
+        """
+    )
+    assert calls(ctx)["os.listdir(p)"] is None  # class-level `os` is visible here
+
+
+def test_later_rebinding_keeps_import_possible():
+    ctx = ctx_for(
+        """
+        import os
+        os.system(a)
+        os = replacement
+        """
+    )
+    assert calls(ctx)["os.system(a)"] == "os.system"
+
+
+def test_try_except_and_conditional_import_fallbacks():
+    ctx = ctx_for(
+        """
+        try:
+            import subprocess
+        except ImportError:
+            subprocess = None
+        if flag:
+            from os import system
+        else:
+            system = print
+        subprocess.run(a, shell=True)
+        system(b)
+        """
+    )
+    resolved = all_names(ctx)
+    assert resolved["subprocess.run(a, shell=True)"] == {"subprocess.run"}
+    assert resolved["system(b)"] == {"os.system"}
+
+
+def test_module_level_walrus_keeps_import_possible():
+    ctx = ctx_for(
+        """
+        import os
+        os.system(a)
+        if (os := other()):
+            pass
+        """
+    )
+    assert calls(ctx)["os.system(a)"] == "os.system"
+
+
+def test_walrus_in_comprehension_binds_enclosing_function():
+    ctx = ctx_for(
+        """
+        def f():
+            [(cmd := x) for x in items]
+            return cmd
+        """
+    )
+    func = ctx.tree.body[0]
+    scope = ctx.scopes.scope_of(func.body[0])
+    assert "cmd" in scope.bindings
+    assert "x" not in scope.bindings
+
+
+def test_nonlocal_refers_to_enclosing_function():
+    ctx = ctx_for(
+        """
+        def outer():
+            from os import system
+
+            def inner():
+                nonlocal system
+                system(a)
+                system = print
+
+            system(b)
+            return inner
+        """
+    )
+    resolved = calls(ctx)
+    assert resolved["system(a)"] == "os.system"
+    assert resolved["system(b)"] == "os.system"
+
+
+def test_star_import_adds_possible_names():
+    ctx = ctx_for(
+        """
+        from os import *
+        system(cmd)
+        eval(x)
+        """
+    )
+    resolved = all_names(ctx)
+    assert "os.system" in resolved["system(cmd)"]
+    assert "eval" in resolved["eval(x)"]

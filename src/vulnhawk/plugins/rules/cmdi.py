@@ -54,11 +54,11 @@ class CommandInjection(RulePlugin):
 
     def check(self, node: ast.AST, ctx: FileContext) -> Iterable[Match]:
         assert isinstance(node, ast.Call)
-        name = ctx.call_name(node)
-        if name in SHELL_FUNCTIONS:
-            via = name
-        elif name in SUBPROCESS_FUNCTIONS and _shell_enabled(node):
-            via = f"{name}(shell=True)"
+        names = ctx.call_names(node)
+        if shell := sorted(names & SHELL_FUNCTIONS):
+            via = shell[0]
+        elif (proc := sorted(names & SUBPROCESS_FUNCTIONS)) and _shell_enabled(node):
+            via = f"{proc[0]}(shell=True)"
         else:
             return
         command = first_arg(node, "args") or first_arg(node, "cmd")

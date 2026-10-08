@@ -68,20 +68,29 @@ class FileContext:
 
     # -- names -------------------------------------------------------------------------
 
+    def resolve_all(self, expr: ast.AST) -> frozenset[str]:
+        """Every dotted name `expr` may refer to (see `plugins.scopes`); empty if unknown."""
+        if isinstance(expr, ast.Name):
+            return self.scopes.resolve_name(expr.id, expr)
+        if isinstance(expr, ast.Attribute):
+            return frozenset(f"{base}.{expr.attr}" for base in self.resolve_all(expr.value))
+        return frozenset()
+
+    def call_names(self, call: ast.Call) -> frozenset[str]:
+        return self.resolve_all(call.func)
+
     def resolve(self, expr: ast.AST) -> str | None:
         """Dotted name of `expr`, resolved in the scope where `expr` appears.
 
         `sp.run` after `import subprocess as sp` -> `subprocess.run`;
         `system` after `from os import system` -> `os.system`; builtins stay bare.
         Local values (parameters, assignments) resolve to None: `os.system` where `os`
-        is a parameter is not the `os` module.
+        is a parameter is not the `os` module. When several names are possible (star
+        imports, import fallbacks) this returns one deterministically; rules matching sinks
+        should use `call_names` / `resolve_all`.
         """
-        if isinstance(expr, ast.Name):
-            return self.scopes.resolve_name(expr.id, expr)
-        if isinstance(expr, ast.Attribute):
-            base = self.resolve(expr.value)
-            return f"{base}.{expr.attr}" if base else None
-        return None
+        names = self.resolve_all(expr)
+        return min(names) if names else None
 
     def call_name(self, call: ast.Call) -> str | None:
         return self.resolve(call.func)

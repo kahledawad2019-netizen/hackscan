@@ -62,15 +62,14 @@ class SqlInjection(RulePlugin):
 
     def check(self, node: ast.AST, ctx: FileContext) -> Iterable[Match]:
         assert isinstance(node, ast.Call)
-        name = ctx.call_name(node)
-        strong = name in SQL_FUNCTIONS
+        strong = bool(ctx.call_names(node) & SQL_FUNCTIONS)
         method = isinstance(node.func, ast.Attribute) and node.func.attr in SQL_METHODS
         if not (strong or method):
             return
         query = first_arg(node, "sql") or first_arg(node, "query")
         if query is None or is_constant(query):
             return
-        if isinstance(query, ast.Call) and ctx.call_name(query) in SQL_FUNCTIONS:
+        if isinstance(query, ast.Call) and ctx.call_names(query) & SQL_FUNCTIONS:
             return  # e.g. session.execute(text(...)): reported at the inner text() call
         db_receiver = strong or _is_db_receiver(node.func, ctx)
 
@@ -90,21 +89,34 @@ def _is_db_receiver(func: ast.expr, ctx: FileContext) -> bool:
     if not isinstance(func, ast.Attribute):
         return False
     receiver = func.value
-    # sqlite3.connect(...).execute(...), psycopg.connect(...).cursor().execute(...)
-    root = receiver
-    while isinstance(root, (ast.Call, ast.Attribute)):
-        if isinstance(root, ast.Call):
-            resolved = ctx.call_name(root)
-            if resolved and resolved.startswith(DB_MODULES):
-                return True
-            root = root.func
-        else:
-            root = root.value
+    if _chain_has_db_call(receiver, ctx):
+        return True
+    # handle = sqlite3.connect(...); handle.execute(...)
+    if isinstance(receiver, ast.Name) and any(
+        _chain_has_db_call(value, ctx) for value in ctx.assignments_before(receiver.id, func)
+    ):
+        return True
     last = receiver
     if isinstance(last, ast.Call):
         last = last.func
     ident = last.attr if isinstance(last, ast.Attribute) else getattr(last, "id", "")
     return bool(_DB_NAME_RE.search(ident))
+
+
+def _chain_has_db_call(expr: ast.AST, ctx: FileContext) -> bool:
+    """sqlite3.connect(...).execute(...), psycopg.connect(...).cursor().execute(...)"""
+    while isinstance(expr, (ast.Call, ast.Attribute)):
+        if isinstance(expr, ast.Call):
+            if any(_in_db_module(n) for n in ctx.call_names(expr)):
+                return True
+            expr = expr.func
+        else:
+            expr = expr.value
+    return False
+
+
+def _in_db_module(name: str) -> bool:
+    return any(name == m or name.startswith(m + ".") for m in DB_MODULES)
 
 
 def _short(text: str, limit: int = 40) -> str:

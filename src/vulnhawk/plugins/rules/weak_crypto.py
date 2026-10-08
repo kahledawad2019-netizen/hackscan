@@ -22,11 +22,11 @@ class WeakHash(RulePlugin):
 
     def check(self, node: ast.AST, ctx: FileContext) -> Iterable[Match]:
         assert isinstance(node, ast.Call)
-        name = ctx.call_name(node)
+        names = ctx.call_names(node)
         confidence = None
-        if name in WEAK_CONSTRUCTORS:
-            algorithm = WEAK_CONSTRUCTORS[name]
-        elif name == "hashlib.new":
+        if constructors := sorted(names & WEAK_CONSTRUCTORS.keys()):
+            algorithm = WEAK_CONSTRUCTORS[constructors[0]]
+        elif "hashlib.new" in names:
             arg = first_arg(node, "name")
             literals = [arg]
             if isinstance(arg, ast.Name):

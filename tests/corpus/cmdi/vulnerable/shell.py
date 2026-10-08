@@ -41,3 +41,11 @@ def dead_constant_branch(cmd):
     if False:
         cmd = "ls"
     os.system(cmd)  # expect: VH-CMDI-001
+
+
+def import_fallback(cmd):
+    try:
+        import subprocess as proc
+    except ImportError:
+        proc = None
+    proc.run(cmd, shell=True)  # expect: VH-CMDI-001

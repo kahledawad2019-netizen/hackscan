@@ -44,3 +44,8 @@ def later_constant(cur, user):
 def job_runner(executor, user):
     # dynamic string, but neither a DB receiver nor SQL text
     executor.execute("job:" + user)
+
+
+def lookalike_module(sqlite3evil, query):
+    # `sqlite3evil` is not sqlite3: prefix matching must respect module boundaries
+    sqlite3evil.connect().execute(query)
