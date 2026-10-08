@@ -102,9 +102,14 @@ its surrounding function to a local Ollama model and asks for a verdict:
 - Code is fenced with a random per-request token and treated as untrusted data; replies
   must match a JSON schema; secret-looking values are redacted; answers are cached.
 
-Use a non-reasoning coder model (e.g. `qwen2.5-coder`). Reasoning models such as
-`deepseek-r1` often spend their whole output budget thinking, which HackScan reports as
-"no answer" and leaves the finding open.
+Use a non-reasoning instruct or coder model. Measured on a CPU-only laptop (~30 s per
+finding): `qwen3:4b-instruct-2507` judged a real injection, a bypassable length check and
+an allow-list guard correctly; `qwen2.5-coder:3b` never suppressed but also missed the
+allow-list guard (larger models do better). Reasoning models such as `deepseek-r1` often
+spend their whole output budget thinking, which HackScan reports as "no answer" and
+leaves the finding open. In the same test both small models obeyed a comment in the
+scanned code telling them to answer "false positive"; the deterministic evidence check
+rejected it and the finding stayed open. That check, not the model, decides suppression.
 
 ### Suppressing a finding
 

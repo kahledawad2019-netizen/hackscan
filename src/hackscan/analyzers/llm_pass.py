@@ -40,7 +40,7 @@ from hackscan.importers.common import SourceIndex
 from hackscan.plugins.base import FileContext
 
 PRODUCER = "llm"
-PROMPT_VERSION = "1"
+PROMPT_VERSION = "3"
 LLM_FALSE_POSITIVE = "llm:false_positive"
 CONFIRM_BOOST = 15
 DEFAULT_HOST = "http://localhost:11434"
@@ -54,13 +54,15 @@ EVIDENCE_KINDS = ("sanitizer", "constant", "guard")
 RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
-        "verdict": {"type": "string", "enum": list(VERDICTS)},
+        # Ollama generates keys in this order: reasoning first, then the decision, then
+        # the evidence kind before its line (small models locate the `if` better).
         "reason": {"type": "string"},
-        "evidence_line": {"type": ["integer", "null"]},
+        "verdict": {"type": "string", "enum": list(VERDICTS)},
         "evidence_kind": {"type": ["string", "null"], "enum": [*EVIDENCE_KINDS, None]},
+        "evidence_line": {"type": ["integer", "null"]},
         "fixed_call": {"type": ["string", "null"]},
     },
-    "required": ["verdict", "reason", "evidence_line", "evidence_kind", "fixed_call"],
+    "required": ["reason", "verdict", "evidence_kind", "evidence_line", "fixed_call"],
 }
 
 SYSTEM_PROMPT = """You are a security code reviewer triaging static-analysis findings.
@@ -74,6 +76,9 @@ Decide whether the finding is exploitable:
 - "false_positive": it cannot. You MUST cite the single line number (as numbered in the
   code) of the sanitizer call, constant assignment, or guard that makes it safe, and its
   kind ("sanitizer", "constant" or "guard"). Without such a line, answer "uncertain".
+  The cited line is always BEFORE the flagged line, never the flagged line itself. For a
+  guard, cite the line of the `if` or `assert` that rejects other values; a guard is
+  "guard", not "constant", even if it compares against constants.
 - "uncertain": you cannot tell from the code shown.
 
 If and only if the verdict is "true_positive", "fixed_call" may contain a safe
@@ -120,9 +125,15 @@ def http_transport(url: str, payload: dict[str, Any], timeout: int) -> dict[str,
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")[:200]
-        raise LLMUnavailable(f"HTTP {exc.code}: {body}") from exc
+        if exc.code == 404 and "not found" in body:
+            model = payload.get("model", "?")
+            raise LLMUnavailable(
+                f"model {model!r} is not installed; run `ollama pull {model}` "
+                "(`ollama list` shows exact tags)"
+            ) from exc
+        raise LLMUnavailable(f"Ollama returned HTTP {exc.code}: {body}") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise LLMUnavailable(str(getattr(exc, "reason", exc))) from exc
+        raise LLMUnavailable(f"Ollama unavailable: {getattr(exc, 'reason', exc)}") from exc
 
 
 def triage(
@@ -166,9 +177,7 @@ def triage(
                 )
                 continue
             except LLMUnavailable as exc:
-                report.warnings.append(
-                    f"llm: triage skipped, Ollama unavailable at {config.host}: {exc}"
-                )
+                report.warnings.append(f"llm: triage skipped ({config.host}): {exc}")
                 report.offline = True
                 break
             if answer is not None:
@@ -279,8 +288,11 @@ def _apply(finding: Finding, answer: dict[str, Any], ctx, config, rescan) -> Fin
                 new = replace(new, fix=fix)
         return new
     if verdict == "false_positive" and config.allow_suppress:
-        line, kind = answer["evidence_line"], answer["evidence_kind"]
-        if line is not None and kind is not None and verify_evidence(ctx, finding, line, kind):
+        verified = _verified_evidence(
+            ctx, finding, answer["evidence_line"], answer["evidence_kind"]
+        )
+        if verified is not None:
+            kind, line = verified
             cited = ctx.lines[line - 1].strip()
             return replace(
                 finding,
@@ -296,6 +308,25 @@ def _apply(finding: Finding, answer: dict[str, Any], ctx, config, rescan) -> Fin
         return replace(finding, evidence=(*finding.evidence, Evidence(PRODUCER, "llm_note", note)))
     note = f"LLM: {verdict.replace('_', ' ')}: {reason}"
     return replace(finding, evidence=(*finding.evidence, Evidence(PRODUCER, "llm_note", note)))
+
+
+def _verified_evidence(
+    ctx: FileContext, finding: Finding, line: int | None, claimed: str | None
+) -> tuple[str, int] | None:
+    """(kind, first line) of the cited statement if any deterministic check accepts it.
+
+    The model only points at a line; its kind label is a hint (small models call a guard
+    a "sanitizer"). Every check is complete on its own, so trying each is equally sound.
+    """
+    if line is None:
+        return None
+    kinds = sorted(EVIDENCE_KINDS, key=lambda k: k != claimed)
+    kind = next((k for k in kinds if verify_evidence(ctx, finding, line, k)), None)
+    if kind is None:
+        return None
+    func = ctx.enclosing_function(_call_at(ctx, finding.location))
+    stmt = next(s for s in func.body if s.lineno <= line <= s.end_lineno)
+    return kind, stmt.lineno
 
 
 def verify_evidence(ctx: FileContext, finding: Finding, line: int, kind: str) -> bool:
@@ -319,7 +350,9 @@ def verify_evidence(ctx: FileContext, finding: Finding, line: int, kind: str) ->
     func = ctx.enclosing_function(call)
     if func is None or isinstance(func, ast.Lambda):
         return False
-    stmt = next((s for s in func.body if s.lineno == line), None)
+    # A citation anywhere inside a top-level statement (e.g. the `return` of a guard)
+    # selects that whole statement; the checks below verify the statement, not the line.
+    stmt = next((s for s in func.body if s.lineno <= line <= s.end_lineno), None)
     if stmt is None or stmt.end_lineno >= finding.location.start_line:
         return False
     sink_names = _sink_value_names(call)

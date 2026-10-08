@@ -265,7 +265,7 @@ def test_offline_degrades_gracefully(tmp_path):
     report = run(tmp_path, PARAM_CMD, FakeOllama(fail=True))
     (f,) = report.findings
     assert f.status is Status.CANDIDATE
-    assert report.offline and "unavailable" in report.warnings[0]
+    assert report.offline and "triage skipped" in report.warnings[0]
 
 
 def test_budget_limits_requests(tmp_path):
@@ -426,3 +426,57 @@ def test_cited_constant_cannot_excuse_a_module_level_value(tmp_path):
     report = run(tmp_path, code, FakeOllama(answer("false_positive", line=6, kind="constant")))
     (f,) = [f for f in report.findings if f.rule_id == "HS-CMDI-001"]
     assert f.status is not Status.SUPPRESSED
+
+
+# -- live-check regressions (qwen3:4b cited the guard's `return`, not its `if`) ---------
+
+
+@pytest.mark.parametrize("body", [b for b, _ in GUARDS if b.count("\n") == 2])
+def test_citing_inside_a_guard_selects_the_guard(tmp_path, body):
+    assert evidence_ok(tmp_path, body, 5, "guard")
+
+
+@pytest.mark.parametrize(
+    ("body", "kind"),
+    [
+        ('    if cmd not in {"ls"}:\n        print("hm")\n', "guard"),  # still no exit
+        ('    if flag:\n        cmd = "ls"\n', "constant"),  # branch body != every path
+        ("    if len(cmd) > 64:\n        return\n", "guard"),  # fake guard, body cited
+    ],
+)
+def test_citing_inside_a_statement_still_verifies_the_whole_statement(tmp_path, body, kind):
+    assert not evidence_ok(tmp_path, body, 5, kind)
+
+
+def test_mislabelled_guard_cited_by_its_return_suppresses(tmp_path):
+    # Exactly what qwen3:4b replied live: line of the `return`, kind "sanitizer".
+    code = 'import os\n\ndef run(cmd):\n    if cmd not in {"ls", "pwd"}:\n        return\n    os.system(cmd)\n'
+    report = run(tmp_path, code, FakeOllama(answer("false_positive", line=5, kind="sanitizer")))
+    (f,) = report.findings
+    assert f.status is Status.SUPPRESSED
+    (ev,) = [e for e in f.evidence if e.kind == "llm_evidence"]
+    assert ev.message == 'Verified guard at line 4: if cmd not in {"ls", "pwd"}:'
+
+
+@pytest.mark.parametrize("kind", ["sanitizer", "constant", "guard", None])
+@pytest.mark.parametrize("line", [4, 5])
+def test_fake_guard_never_suppresses_under_any_label(tmp_path, kind, line):
+    code = "import os\n\ndef run(cmd):\n    if len(cmd) > 64:\n        return\n    os.system(cmd)\n"
+    report = run(tmp_path, code, FakeOllama(answer("false_positive", line=line, kind=kind)))
+    (f,) = report.findings
+    assert f.status is Status.CANDIDATE
+
+
+def test_missing_model_message_is_actionable(monkeypatch):
+    import io
+    import urllib.error
+
+    from hackscan.analyzers import llm_pass
+
+    def fake_urlopen(request, timeout):
+        body = io.BytesIO(b'{"error":"model \'x:1b\' not found"}')
+        raise urllib.error.HTTPError("u", 404, "nf", {}, body)
+
+    monkeypatch.setattr(llm_pass.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(LLMUnavailable, match=r"not installed; run `ollama pull x:1b`"):
+        llm_pass.http_transport("http://h/api/chat", {"model": "x:1b"}, 5)

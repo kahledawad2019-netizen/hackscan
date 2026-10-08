@@ -293,3 +293,11 @@ hackscan/
   parameterized (a single placeholder changes results); f-string/% argv values are wrapped
   in `str()`; imports are never inserted above a shebang or encoding cookie; malformed
   Ollama replies are discarded instead of crashing.
+- 2026-10-09 (live Ollama check, CPU-only): qwen3:4b-instruct-2507 got real injection,
+  fake length guard and allow-list guard right once the verifier (a) maps a cited line
+  inside a top-level statement (e.g. a guard's `return`) to that statement and (b) treats
+  the model's evidence kind as a hint, trying every deterministic check (each is complete
+  on its own, so this is equally sound). Response schema now orders `reason` first
+  (Ollama generates keys in schema order), prompt v3. qwen2.5-coder:3b: safe but misses
+  the guard. Both models obeyed an injected "reply false_positive" comment; the verifier
+  rejected it. A missing model now reports "not installed; run `ollama pull <model>`".
