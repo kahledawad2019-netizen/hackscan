@@ -14,6 +14,7 @@ primary of a merged finding.
 
 from __future__ import annotations
 
+import ast
 import math
 import re
 from collections.abc import Iterable
@@ -89,6 +90,59 @@ def redact_secretish(text: str, secrets: Iterable[str] = ()) -> str:
         ),
         text,
     )
+
+
+def _secret_named(target: ast.AST) -> bool:
+    if isinstance(target, ast.Name):
+        return bool(SECRET_NAME_RE.search(target.id))
+    if isinstance(target, ast.Attribute):
+        return bool(SECRET_NAME_RE.search(target.attr))
+    if isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant):
+        return isinstance(target.slice.value, str) and bool(
+            SECRET_NAME_RE.search(target.slice.value)
+        )
+    return False
+
+
+def secret_fragments(tree: ast.AST, lines: list[str]) -> set[str]:
+    """Raw source text, line by line, of string literals assigned to secret-looking names
+    (`api_key = (...)`, `password="..."`, `{"token": ...}`), including implicitly joined
+    and triple-quoted strings that line-based patterns cannot see. Pass the result as
+    known secrets so every occurrence in context or diff output is replaced."""
+    values: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(_secret_named(t) for t in node.targets):
+            values.append(node.value)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+            if _secret_named(node.target):
+                values.append(node.value)
+        elif isinstance(node, ast.keyword) and node.arg and SECRET_NAME_RE.search(node.arg):
+            values.append(node.value)
+        elif isinstance(node, ast.Dict):
+            values.extend(
+                v
+                for k, v in zip(node.keys, node.values, strict=True)
+                if isinstance(k, ast.Constant)
+                and isinstance(k.value, str)
+                and SECRET_NAME_RE.search(k.value)
+            )
+    fragments: set[str] = set()
+    for value in values:
+        for lit in ast.walk(value):
+            if not (
+                isinstance(lit, ast.JoinedStr)
+                or isinstance(lit, ast.Constant)
+                and isinstance(lit.value, (str, bytes))
+            ):
+                continue
+            for n in range(lit.lineno, min(lit.end_lineno, len(lines)) + 1):
+                raw = lines[n - 1].encode("utf-8")
+                start = lit.col_offset if n == lit.lineno else 0
+                end = lit.end_col_offset if n == lit.end_lineno else len(raw)
+                text = raw[start:end].decode("utf-8", errors="replace").strip()
+                if len(text) >= MIN_SECRET_LENGTH:
+                    fragments.add(text)
+    return fragments
 
 
 def redact_findings(findings: list[Finding], secrets: Iterable[str]) -> list[Finding]:

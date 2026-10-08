@@ -527,3 +527,36 @@ def test_missing_model_message_is_actionable(monkeypatch):
     monkeypatch.setattr(llm_pass.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(LLMUnavailable, match=r"not installed; run `ollama pull x:1b`"):
         llm_pass.http_transport("http://h/api/chat", {"model": "x:1b"}, 5)
+
+
+# -- Codex M4 re-review: secrets split across lines never reach the model --------------
+
+
+@pytest.mark.parametrize(
+    ("assignment", "pieces"),
+    [
+        (
+            '    api_key = (\n        "alpha12345"\n        "beta67890"\n    )\n',
+            ["alpha12345", "beta67890"],
+        ),
+        ('    api_key = """mysecretvalue"""\n', ["mysecretvalue"]),
+        (
+            '    token = """line-one-secret\nline-two-secret"""\n',
+            ["line-one-secret", "line-two-secret"],
+        ),
+        ('    db = connect(\n        password="hunter2hunter2",\n    )\n', ["hunter2hunter2"]),
+        (
+            '    cfg = {\n        "auth_token":\n            "dict-secret-1",\n    }\n',
+            ["dict-secret-1"],
+        ),
+        ('    self.secret = f"pre-{cmd}-post-value"\n', ["pre-", "-post-value"]),
+    ],
+)
+def test_split_and_triple_quoted_secrets_are_redacted(tmp_path, assignment, pieces):
+    code = f"import os\n\ndef run(self, cmd, connect):\n{assignment}    os.system(cmd)\n"
+    fake = FakeOllama(answer())
+    run(tmp_path, code, fake)
+    sent = json.dumps(fake.requests[0])
+    for piece in pieces:
+        assert piece not in sent, piece
+    assert "os.system(cmd)" in sent  # the code itself is still shown

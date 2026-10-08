@@ -103,3 +103,15 @@ def test_fix_diff_context_is_redacted(tmp_path):
     )
     assert "hashlib.sha256" in out
     assert secret not in out
+
+
+def test_fix_diff_redacts_split_secrets(tmp_path):
+    (tmp_path / "m.py").write_text(
+        'import hashlib\n\ndef f(d):\n    api_key = (\n        "alpha12345"\n        "beta67890"\n    )\n'
+        "    return hashlib.md5(d).hexdigest()\n"
+    )
+    out = (
+        CliRunner().invoke(main, ["scan", str(tmp_path), "--show-fixes", "--color", "never"]).output
+    )
+    assert "hashlib.sha256" in out
+    assert "alpha12345" not in out and "beta67890" not in out

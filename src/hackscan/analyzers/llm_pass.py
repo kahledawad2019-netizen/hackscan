@@ -35,7 +35,7 @@ from urllib.parse import urlparse
 
 from hackscan.analyzers.remediate import _call_at, _node_region, apply_edits
 from hackscan.core.models import Evidence, Finding, Fix, FixEdit, Status
-from hackscan.core.redact import redact_secretish
+from hackscan.core.redact import redact_secretish, secret_fragments
 from hackscan.importers.common import SourceIndex
 from hackscan.plugins.base import FileContext
 
@@ -163,12 +163,13 @@ def triage(
         if loaded is None:
             continue
         ctx, _ = loaded
-        context, first_line = _context(ctx, finding, secrets)
+        file_secrets = [*secrets, *secret_fragments(ctx.tree, ctx.lines)]
+        context, first_line = _context(ctx, finding, file_secrets)
         key = _cache_key(finding, config, context)
         answer = cache.get(key)
         if answer is None:
             try:
-                answer = _ask(finding, context, first_line, config, transport, secrets)
+                answer = _ask(finding, context, first_line, config, transport, file_secrets)
             except LLMNoAnswer as exc:
                 report.reviewed += 1
                 report.warnings.append(

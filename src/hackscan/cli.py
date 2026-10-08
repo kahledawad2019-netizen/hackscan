@@ -327,16 +327,21 @@ def _with(result: ScanResult, findings: list[Finding]) -> ScanResult:
 
 
 def _diff(result: ScanResult, finding: Finding) -> str:
+    import ast
+
     from hackscan.analyzers.remediate import fix_diff
+    from hackscan.core.redact import secret_fragments
 
     try:
         path = result.root / finding.location.path
         source = path.read_text(encoding="utf-8")
         diff = fix_diff(source, finding.fix, finding.location.path)
-    except (OSError, UnicodeDecodeError, ValueError):
+        fragments = secret_fragments(ast.parse(source), source.splitlines())
+    except (OSError, UnicodeDecodeError, ValueError, SyntaxError):
         return ""
     # Diff context shows raw source: redact anything secret-looking before printing.
-    return "\n".join(redact_secretish(line, result.secrets) for line in diff.splitlines())
+    secrets = [*result.secrets, *fragments]
+    return "\n".join(redact_secretish(line, secrets) for line in diff.splitlines())
 
 
 def _json(result: ScanResult, findings: list[Finding]) -> dict:
