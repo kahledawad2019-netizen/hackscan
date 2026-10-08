@@ -77,7 +77,7 @@ Decide whether the finding is exploitable:
   code) of the sanitizer call, constant assignment, or guard that makes it safe, and its
   kind ("sanitizer", "constant" or "guard"). Without such a line, answer "uncertain".
   The cited line is always BEFORE the flagged line, never the flagged line itself. For a
-  guard, cite the line of the `if` or `assert` that rejects other values; a guard is
+  guard, cite the line of the `if` that rejects other values; a guard is
   "guard", not "constant", even if it compares against constants.
 - "uncertain": you cannot tell from the code shown.
 
@@ -340,8 +340,8 @@ def verify_evidence(ctx: FileContext, finding: Finding, line: int, kind: str) ->
       including nested functions (closures, `nonlocal`);
     - be one of: an assignment from a constant; an assignment from a sanitizer valid for
       the finding's class (shell quoting excluded: POSIX-only); or an allow-list guard
-      that exits otherwise (`if x not in {..constants..}: return/raise`, `assert x in
-      {...}`, `if not x.isdigit()/isalnum()/isidentifier(): return/raise`).
+      that exits otherwise (`if x not in {..constants..}: return/raise`,
+      `if not x.isdigit()/isalnum()/isidentifier(): return/raise`; never `assert`).
     An LLM suppression is therefore never weaker than the engine's own reasoning.
     """
     call = _call_at(ctx, finding.location)
@@ -413,16 +413,37 @@ def _local_names(func: ast.AST) -> set[str]:
     return names
 
 
+def _bound_names(node: ast.AST) -> set[str] | None:
+    """Names `node` itself binds; None if it may bind any name (`from m import *`)."""
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        return {node.id}
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        if any(a.name == "*" for a in node.names):
+            return None
+        return {a.asname or a.name.split(".")[0] for a in node.names}
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {node.name}
+    if isinstance(node, ast.ExceptHandler) and node.name:
+        return {node.name}
+    if isinstance(node, ast.arg):
+        return {node.arg}
+    match_as = getattr(ast, "MatchAs", ())
+    match_star = getattr(ast, "MatchStar", ())
+    match_mapping = getattr(ast, "MatchMapping", ())
+    if match_as and isinstance(node, (match_as, match_star)) and node.name:
+        return {node.name}  # `case cmd:` / `case [*cmd]:` capture
+    if match_mapping and isinstance(node, match_mapping) and node.rest:
+        return {node.rest}
+    return set()
+
+
 def _rebound_after(func: ast.AST, names: set[str], line: int) -> bool:
     for node in ast.walk(func):
         lineno = getattr(node, "lineno", 0)
         if lineno <= line:
             continue
-        if (
-            isinstance(node, ast.Name)
-            and isinstance(node.ctx, (ast.Store, ast.Del))
-            and node.id in names
-        ):
+        bound = _bound_names(node)
+        if bound is None or names & bound:
             return True
         if isinstance(node, (ast.Nonlocal, ast.Global)) and names & set(node.names):
             return True
@@ -460,9 +481,8 @@ _SAFE_PREDICATES = {"isdigit", "isdecimal", "isnumeric", "isalnum", "isalpha", "
 
 def _allow_list_guard(stmt: ast.stmt) -> set[str]:
     """Names an allow-list guard restricts, or an empty set if `stmt` is not one."""
-    if isinstance(stmt, ast.Assert):
-        test, negated = stmt.test, False
-    elif isinstance(stmt, ast.If) and not stmt.orelse and _exits(stmt.body):
+    # `assert` is never evidence: `python -O` removes it.
+    if isinstance(stmt, ast.If) and not stmt.orelse and _exits(stmt.body):
         test, negated = stmt.test, True  # body runs when the value is NOT allowed
     else:
         return set()

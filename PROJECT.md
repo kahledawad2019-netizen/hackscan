@@ -276,7 +276,7 @@ hackscan/
   replies, per-request random code fence, redacted context, cache, `--llm-max`,
   `--llm-timeout`, bounded output tokens. LLM suppression requires evidence that a
   deterministic checker accepts and that holds on every path: a constant or class-valid
-  sanitizer assignment, or an allow-list guard (`not in {consts}`, `assert x in (...)`,
+  sanitizer assignment, or an allow-list guard (`not in {consts}`, 
   `isdigit()/isalnum()`), in the function body before the sink, covering all sink locals,
   never rebound/mutated afterwards. LLM fixes are kept only if the patched file parses and
   re-running passes 1-2 shows the finding gone and no new ones. Measured locally: CPU-only

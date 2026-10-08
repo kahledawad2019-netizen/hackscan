@@ -144,7 +144,6 @@ def test_fence_is_random_per_request(tmp_path):
 
 GUARDS = [
     ('    if cmd not in {"ls", "pwd"}:\n        return\n', 4),
-    ('    assert cmd in ("ls", "pwd")\n', 4),
     ("    if not cmd.isalnum():\n        raise ValueError(cmd)\n", 4),
 ]
 
@@ -189,6 +188,15 @@ def test_verify_evidence_accepts(tmp_path, body, line, kind):
         ('    cmd = "ls"\n    cmd = cmd + extra\n', 4, "constant"),
         # mutated later
         ('    cmd = ["ls"]\n    cmd.append(extra)\n', 4, "constant"),
+        # assert: removed under `python -O`
+        ('    assert cmd in ("ls", "pwd")\n', 4, "guard"),
+        # later rebinding by a match capture / an import
+        (
+            '    if cmd not in {"ls"}:\n        return\n    match flag:\n        case cmd:\n            pass\n',
+            4,
+            "guard",
+        ),
+        ('    cmd = "ls"\n    from shlex import cmd\n', 4, "constant"),
         # guard that does not restrict the value
         ("    if len(cmd) > 100:\n        return\n", 4, "guard"),
         # guard that does not exit
@@ -231,7 +239,7 @@ def test_closure_rebinding_defeats_evidence(tmp_path):
 
 
 def test_llm_no_suppress_option(tmp_path):
-    code = 'import os\n\ndef run(cmd):\n    assert cmd in ("ls",)\n    os.system(cmd)\n'
+    code = 'import os\n\ndef run(cmd):\n    if cmd not in ("ls",):\n        return\n    os.system(cmd)\n'
     fake = FakeOllama(answer("false_positive", line=4, kind="guard"))
     (f,) = run(tmp_path, code, fake, allow_suppress=False).findings
     assert f.status is Status.CANDIDATE

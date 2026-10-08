@@ -97,7 +97,7 @@ its surrounding function to a local Ollama model and asks for a verdict:
   kept only if the patched file parses and a re-scan shows the finding gone and nothing new.
 - **false positive**: only accepted if the model cites a line that HackScan verifies runs
   on every path and makes the value safe: an allow-list guard (`if x not in {...}: return`,
-  `assert x in (...)`, `if not x.isdigit(): raise`), a constant, or a class-appropriate
+  `if not x.isdigit(): raise`), a constant, or a class-appropriate
   sanitizer. Otherwise the reasoning is attached as a note and the finding stays open.
 - Code is fenced with a random per-request token and treated as untrusted data; replies
   must match a JSON schema; secret-looking values are redacted; answers are cached.
