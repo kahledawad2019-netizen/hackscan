@@ -141,7 +141,7 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 | M1 ✅ | AST engine & rules | Rules 1–2 pass per-rule vulnerable **and** safe fixtures | M0 |
 | M2 ✅ | Taint | Framework fixtures (Flask/Django/FastAPI); constant/sanitized flows suppressed; tests for taint boundaries | M1 |
 | M3 ✅ | CLI, SARIF, importers → **v0.1.0 on PyPI** (released 2026-10-08) | `pip install hackscan` works on clean venv; SARIF validates against official schema; `--fail-on` exit codes tested | M2 |
-| M4 | LLM + remediation + TUI → v0.2.0 | All LLM tests run against a mocked Ollama; offline degradation tested; prompt-injection fixture | M3 |
+| M4 🔨 | LLM + remediation + TUI → v0.2.0 (built; release pending) | All LLM tests run against a mocked Ollama; offline degradation tested; prompt-injection fixture | M3 |
 | M5 | Inter-procedural taint, benchmark, GitHub Action → v0.3.0 | Benchmark report in README; Action used on the repo itself | M4 |
 
 ## Test Strategy

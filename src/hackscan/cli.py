@@ -10,6 +10,7 @@ complete, so it must not look like a pass or an ordinary failure.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -99,6 +100,12 @@ def main() -> None:
     help="Use this config file instead of discovering .hackscan.yml.",
 )
 @click.option("-q", "--quiet", is_flag=True, help="Only print findings (no header/summary).")
+@click.option(
+    "--color",
+    type=click.Choice(["auto", "always", "never"]),
+    default="auto",
+    help="Rich terminal output: auto = only on an interactive terminal (not CI/NO_COLOR).",
+)
 def scan_command(
     path: Path,
     fmt: str,
@@ -112,6 +119,7 @@ def scan_command(
     no_fix: bool,
     show_fixes: bool,
     llm_no_suppress: bool,
+    color: str,
     **options,
 ) -> None:
     """Scan PATH (a directory or a Python file) for vulnerabilities."""
@@ -140,7 +148,15 @@ def scan_command(
             with_tools=parse_tools(with_tools, click.BadParameter) if with_tools else None,
             imports=_parse_imports(imports) if imports else None,
         )
-        result = scan(path, config)
+        console = _rich_console(color) if fmt == "text" and output is None and not quiet else None
+        if console is not None:
+            from hackscan.ui.render import banner
+
+            banner(console)
+            with console.status("[green]Scanning...", spinner="dots"):
+                result = scan(path, config)
+        else:
+            result = scan(path, config)
         plugins = resolve_plugins(config.plugins)
     except (ConfigError, PluginError, click.BadParameter) as exc:
         click.echo(f"hackscan: error: {exc}", err=True)
@@ -157,7 +173,20 @@ def scan_command(
         text = json.dumps(_json(result, shown), indent=2)
     else:
         shown = _visible(result.findings, config, config.show_suppressed)
-        text = _text(result, shown, config, quiet, show_fixes)
+        if console is not None:
+            from hackscan.ui.render import render
+
+            render(
+                console,
+                result,
+                shown,
+                config,
+                show_fixes=show_fixes,
+                diff_for=lambda f: _diff(result, f),
+            )
+            text = None
+        else:
+            text = _text(result, shown, config, quiet, show_fixes)
 
     if output is not None:
         try:
@@ -168,7 +197,7 @@ def scan_command(
             sys.exit(EXIT_ERROR)
         if not quiet:
             click.echo(f"hackscan: wrote {fmt} report to {output}", err=True)
-    else:
+    elif text is not None:
         click.echo(text)
 
     if result.errors and not config.allow_incomplete:
@@ -230,6 +259,19 @@ def _is_hackscan_report(path: Path) -> bool:
     except OSError:
         return False
     return head.startswith("HackScan ") or any(sig in head for sig in REPORT_SIGNATURES[:2])
+
+
+def _rich_console(color: str):
+    """A Rich console when colorful interactive output is wanted, else None."""
+    if color == "never":
+        return None
+    if color == "auto" and (
+        not sys.stdout.isatty() or os.environ.get("NO_COLOR") or os.environ.get("CI")
+    ):
+        return None
+    from rich.console import Console
+
+    return Console(force_terminal=color == "always", highlight=False)
 
 
 def _parse_imports(values: tuple[str, ...]) -> tuple[tuple[str, Path], ...]:

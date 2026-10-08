@@ -22,6 +22,8 @@ HIGH     confirmed  views.py:10:9  HS-SQLI-001  [100%]
 | **Sound suppression** | A finding is only dismissed if *every* path is safe. Branches, loops (`break`/`continue`), `try`/`except`/`finally`, aliasing and mutation of lists/dicts, closures and `:=` are modeled. A differential fuzzer executes thousands of random programs to check that no dismissed sink ever receives attacker input. |
 | **Framework-aware** | Sources: Flask `request.*`, Django/DRF/Starlette/FastAPI request objects (incl. `self.request`), route-handler parameters, `input()`, `sys.argv`. |
 | **One report from many tools** | Imports Semgrep, Bandit, CodeQL (SARIF) and Gitleaks; deduplicates by vulnerability class and location, keeping every tool as provenance. |
+| **Fixes you can apply** | Mechanical, validated fix suggestions: parameterized queries (driver-aware placeholders), argument lists instead of shell strings, `ast.literal_eval`, SHA-256. Each is an exact edit that re-parses; ambiguous cases get no fix rather than a wrong one. |
+| **Optional local-LLM triage** | `--llm` asks a local Ollama model about remaining candidates. It can confirm, but may only suppress by citing a line that HackScan verifies itself (an allow-list guard, constant or sanitizer that holds on every path). Code is treated as untrusted data; secrets are redacted. |
 | **CI-ready** | SARIF 2.1.0 (validated against the OASIS schema) for GitHub code scanning, `--fail-on` exit codes, stable fingerprints that survive code moves. |
 
 ## Install
@@ -30,7 +32,7 @@ HIGH     confirmed  views.py:10:9  HS-SQLI-001  [100%]
 pip install hackscan        # or: uv tool install hackscan / pipx install hackscan
 ```
 
-Python 3.10–3.13, any OS. No network access and no LLM needed.
+Python 3.10–3.13, any OS. No network access and no LLM needed (`--llm` is opt-in).
 
 ## Usage
 
@@ -41,6 +43,8 @@ hackscan scan . --fail-on high                    # exit 1 on open high/critical
 hackscan scan . --format json --show-suppressed   # everything, machine-readable
 hackscan scan . --with bandit,semgrep,gitleaks    # also run these tools if installed
 hackscan scan . --import codeql=results.sarif     # merge a report you already have
+hackscan scan . --show-fixes                      # include fix suggestions as diffs
+hackscan scan . --llm --model qwen2.5-coder:7b    # triage candidates with local Ollama
 hackscan rules                                    # list rules
 ```
 
@@ -54,6 +58,10 @@ hackscan rules                                    # list rules
 | `--plugins DIR` | Load custom rules (see below). |
 | `--allow-incomplete` | Do not exit 2 when some files cannot be analyzed (they are still listed). |
 | `--no-taint` | Pattern matching only. |
+| `--show-fixes` / `--no-fix` | Print suggested fixes as diffs / do not generate fixes (fixes are also in JSON and SARIF `fixes`). |
+| `--llm`, `--model`, `--ollama-host` | Opt-in LLM triage of candidates via Ollama (default `http://localhost:11434`). |
+| `--llm-max`, `--llm-timeout`, `--llm-no-suppress` | LLM budget (default 20 findings, 60 s/request); let the LLM confirm/annotate but never suppress. |
+| `--color auto\|always\|never` | Rich terminal output; `auto` uses it only on an interactive terminal (not in CI, pipes or with `NO_COLOR`). |
 | `--jobs N` | Worker processes (default: automatic). |
 
 Exit codes: `0` OK, `1` `--fail-on` threshold reached, `2` usage/config/plugin error or
@@ -76,7 +84,27 @@ with: [bandit]
 import:
   codeql: codeql-results.sarif
 plugins: security/rules
+llm: false
+llm-model: qwen2.5-coder:7b
 ```
+
+### LLM triage
+
+`--llm` sends each remaining *candidate* (never confirmed or suppressed findings) with
+its surrounding function to a local Ollama model and asks for a verdict:
+
+- **true positive**: the finding becomes *confirmed* (+15 confidence); a suggested fix is
+  kept only if the patched file parses and a re-scan shows the finding gone and nothing new.
+- **false positive**: only accepted if the model cites a line that HackScan verifies runs
+  on every path and makes the value safe: an allow-list guard (`if x not in {...}: return`,
+  `assert x in (...)`, `if not x.isdigit(): raise`), a constant, or a class-appropriate
+  sanitizer. Otherwise the reasoning is attached as a note and the finding stays open.
+- Code is fenced with a random per-request token and treated as untrusted data; replies
+  must match a JSON schema; secret-looking values are redacted; answers are cached.
+
+Use a non-reasoning coder model (e.g. `qwen2.5-coder`). Reasoning models such as
+`deepseek-r1` often spend their whole output budget thinking, which HackScan reports as
+"no answer" and leaves the finding open.
 
 ### Suppressing a finding
 
@@ -140,6 +168,7 @@ class PickleLoads(RulePlugin):
 - Taint analysis is intra-procedural: values arriving through function parameters are
   candidates, not confirmations (inter-procedural analysis is on the roadmap).
 - Python only. Imported tools may cover other languages; their findings are passed through.
+- Fix suggestions are deliberately conservative: many vulnerable lines get none.
 
 ## Development
 
