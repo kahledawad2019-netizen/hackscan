@@ -27,6 +27,7 @@ CONFIG_KEYS = frozenset(
         "show-suppressed",
         "plugins",
         "taint",
+        "fixes",
         "with",
         "import",
         "tool-timeout",
@@ -75,6 +76,7 @@ class HackScanConfig:
     show_suppressed: bool = False
     plugins: Path | None = None
     taint: bool = True
+    fixes: bool = True  # deterministic template fix suggestions (pass 4)
     with_tools: tuple[str, ...] = ()
     imports: tuple[tuple[str, Path], ...] = ()  # (format, report file)
     tool_timeout: int = 300
@@ -141,7 +143,7 @@ def _merge(config: HackScanConfig, data: dict[str, Any], path: Path) -> HackScan
         if not isinstance(value, int) or not 0 <= value <= 100:
             raise err("`min-confidence` must be an integer 0-100")
         values["min_confidence"] = value
-    for key in ("show-suppressed", "taint", "strict-tools", "allow-incomplete"):
+    for key in ("show-suppressed", "taint", "fixes", "strict-tools", "allow-incomplete"):
         if key in data:
             if not isinstance(data[key], bool):
                 raise err(f"`{key}` must be true or false")

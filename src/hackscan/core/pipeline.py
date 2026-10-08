@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from hackscan.analyzers.ast_pass import FileResult, analyze_file
+from hackscan.analyzers.remediate import generate_fixes
 from hackscan.config import DEFAULT_IGNORES, HackScanConfig
 from hackscan.core.dedupe import merge_findings
 from hackscan.core.fingerprint import assign_ids
@@ -53,13 +54,14 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
         findings.extend(result.findings)
         errors.extend(result.errors)
 
+    index = SourceIndex(root)
     external = collect(
         root,
         target,
         config.with_tools,
         config.imports,
         config.tool_timeout,
-        SourceIndex(root),
+        index,
     )
     # Imported findings obey the same ignores as discovery (defaults included).
     findings.extend(
@@ -67,6 +69,8 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
     )
 
     final = assign_ids(redact_findings(merge_findings(findings), external.secrets))
+    if config.fixes:
+        final = generate_fixes(final, index)
     return ScanResult(
         root=root,
         findings=final,

@@ -76,6 +76,8 @@ def main() -> None:
     help="Do not exit 2 when some files cannot be analyzed (they are still reported).",
 )
 @click.option("--no-taint", is_flag=True, default=False, help="Skip the taint pass.")
+@click.option("--no-fix", is_flag=True, default=False, help="Do not suggest fixes.")
+@click.option("--show-fixes", is_flag=True, default=False, help="Print suggested fixes as diffs.")
 @click.option("--jobs", type=click.IntRange(0), help="Worker processes (0 = automatic).")
 @click.option(
     "--config",
@@ -94,6 +96,8 @@ def scan_command(
     with_tools: str | None,
     imports: tuple[str, ...],
     sarif_omit_suppressed: bool,
+    no_fix: bool,
+    show_fixes: bool,
     **options,
 ) -> None:
     """Scan PATH (a directory or a Python file) for vulnerabilities."""
@@ -112,6 +116,7 @@ def scan_command(
             allow_incomplete=options["allow_incomplete"],
             jobs=options["jobs"],
             taint=False if no_taint else None,
+            fixes=False if no_fix else None,
             with_tools=parse_tools(with_tools, click.BadParameter) if with_tools else None,
             imports=_parse_imports(imports) if imports else None,
         )
@@ -132,7 +137,7 @@ def scan_command(
         text = json.dumps(_json(result, shown), indent=2)
     else:
         shown = _visible(result.findings, config, config.show_suppressed)
-        text = _text(result, shown, config, quiet)
+        text = _text(result, shown, config, quiet, show_fixes)
 
     if output is not None:
         try:
@@ -256,6 +261,17 @@ def _with(result: ScanResult, findings: list[Finding]) -> ScanResult:
     )
 
 
+def _diff(result: ScanResult, finding: Finding) -> str:
+    from hackscan.analyzers.remediate import fix_diff
+
+    try:
+        path = result.root / finding.location.path
+        source = path.read_text(encoding="utf-8")
+        return fix_diff(source, finding.fix, finding.location.path)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return ""
+
+
 def _json(result: ScanResult, findings: list[Finding]) -> dict:
     return {
         "tool": {"name": "hackscan", "version": __version__},
@@ -273,7 +289,13 @@ def _json(result: ScanResult, findings: list[Finding]) -> dict:
     }
 
 
-def _text(result: ScanResult, findings: list[Finding], config: HackScanConfig, quiet: bool) -> str:
+def _text(
+    result: ScanResult,
+    findings: list[Finding],
+    config: HackScanConfig,
+    quiet: bool,
+    show_fixes: bool = False,
+) -> str:
     lines: list[str] = []
     if not quiet:
         lines.append(
@@ -301,6 +323,10 @@ def _text(result: ScanResult, findings: list[Finding], config: HackScanConfig, q
         )
         if f.sources != (OWN_SOURCE,):
             lines.append(f"    sources: {', '.join(f.sources)}")
+        if f.fix is not None:
+            lines.append(f"    fix: {f.fix.description}")
+            if show_fixes:
+                lines.extend(f"      {line}" for line in _diff(result, f).splitlines())
     if quiet:
         return "\n".join(lines)
     counts = {s: sum(f.status is s for f in findings) for s in Status}
