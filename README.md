@@ -100,8 +100,9 @@ low-confidence candidates rather than suppressed.
 from hackscan.core.models import Severity
 from hackscan.plugins import Match, RulePlugin
 
+
 class PickleLoads(RulePlugin):
-    rule_id = "ACME-PICKLE-001"   # the HS- prefix is reserved
+    rule_id = "ACME-PICKLE-001"  # the HS- prefix is reserved
     name = "pickle-loads"
     description = "pickle.loads on untrusted data"
     severity = Severity.HIGH
