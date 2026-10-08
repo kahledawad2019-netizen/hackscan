@@ -17,7 +17,20 @@ from vulnhawk.plugins.loader import builtin_plugins
 
 CORPUS = Path(__file__).parent / "corpus"
 EXPECT_RE = re.compile(r"#\s*expect:\s*(?P<rules>[A-Za-z0-9:_\-. ]+)")
+SUPPRESSED_RE = re.compile(r"#\s*expect-suppressed:\s*(?P<rule>\S+)\s+(?P<reason>\S+)")
+# Flipped to True when the taint pass (M2) runs in this harness: expect-suppressed
+# findings must then be suppressed with the stated reason, not merely present.
+TAINT_PASS_ENABLED = False
 CORPUS_FILES = sorted(p for p in CORPUS.rglob("*.py"))
+
+
+def expected_suppressed(path: Path) -> dict[tuple[int, str], str]:
+    out: dict[tuple[int, str], str] = {}
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        match = SUPPRESSED_RE.search(line)
+        if match:
+            out[(lineno, match.group("rule"))] = match.group("reason")
+    return out
 
 
 def expected_findings(path: Path) -> Counter[tuple[int, str]]:
@@ -34,10 +47,18 @@ def expected_findings(path: Path) -> Counter[tuple[int, str]]:
 def test_corpus_file(path: Path):
     result = analyze_file(path, CORPUS, builtin_plugins())
     assert not result.errors
+    suppressed = expected_suppressed(path)
+    for key, reason in suppressed.items():
+        hits = [f for f in result.findings if (f.location.start_line, f.rule_id) == key]
+        assert hits, f"expected (suppressed) finding missing: {key}"
+        if TAINT_PASS_ENABLED:
+            assert all(f.status is Status.SUPPRESSED for f in hits), key
+            assert all(f.suppression == reason for f in hits), key
     actual = Counter(
         (f.location.start_line, f.rule_id)
         for f in result.findings
         if f.status is not Status.SUPPRESSED
+        and (f.location.start_line, f.rule_id) not in suppressed
     )
     expected = expected_findings(path)
     missing = expected - actual

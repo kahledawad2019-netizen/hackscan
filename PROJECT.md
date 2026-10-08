@@ -201,3 +201,12 @@ vulnhawk/
   `sink` field for fingerprints, union locations, evidence concatenation, canonical-JSON tie-breaks,
   end-column validation. Round 2: precision-first anchors, union on effective ends, merged
   findings keep a recorded `sink`; randomized order-independence test.
+- 2026-10-08 (Codex M1 review): **rules report candidates, taint decides.** Rules no longer
+  dismiss findings via flow-insensitive assignment lookups (e.g. a constant assigned under
+  `if False`); every non-constant value at a sink is a candidate (lower confidence when
+  unresolved), and constant/sanitized flows are suppressed by the M2 taint pass. Corpus marks
+  these with `# expect-suppressed:`; the harness enforces the suppression once
+  `TAINT_PASS_ENABLED` is flipped in M2. Name resolution is now scope-aware
+  (`plugins/scopes.py`: function/class/global rules; decorators and defaults evaluate in the
+  enclosing scope). SQLi requires a DB-looking receiver or SQL text in the literal parts.
+  Plugins are type-validated; bad matches and declared source encodings are handled.

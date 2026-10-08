@@ -15,7 +15,7 @@ def constant_fstring(cur):
 
 def constant_variable(cur):
     query = "SELECT * FROM users"
-    cur.execute(query)
+    cur.execute(query)  # expect-suppressed: VH-SQLI-001 taint:constant_input
 
 
 def constant_concat(cur):
@@ -33,3 +33,14 @@ def not_sql(executor, job):
 
 def logging_format(log, user):
     log.info("user %s logged in" % user)
+
+
+def later_constant(cur, user):
+    query = "SELECT * FROM users WHERE name = '%s'" % user
+    query = "SELECT 1"
+    cur.execute(query)  # expect-suppressed: VH-SQLI-001 taint:constant_input
+
+
+def job_runner(executor, user):
+    # dynamic string, but neither a DB receiver nor SQL text
+    executor.execute("job:" + user)

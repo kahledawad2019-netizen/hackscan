@@ -16,3 +16,8 @@ def by_name(data: bytes) -> str:
 
 def explicit_security(data: bytes) -> str:
     return hashlib.sha1(data, usedforsecurity=True).hexdigest()  # expect: VH-CRYPTO-001
+
+
+def algorithm_variable(data: bytes) -> str:
+    algorithm = "sha1"
+    return hashlib.new(algorithm, data).hexdigest()  # expect: VH-CRYPTO-001

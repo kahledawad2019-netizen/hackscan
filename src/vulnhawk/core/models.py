@@ -10,6 +10,7 @@ import json
 import math
 from dataclasses import dataclass
 from enum import Enum
+from functools import cached_property
 from typing import Any
 
 SCHEMA_VERSION = 1
@@ -168,6 +169,12 @@ class Finding:
 
     def canonical_json(self) -> str:
         """Stable serialization; a total-order tie-breaker for equal-looking findings."""
+        return self._canonical_json
+
+    @cached_property
+    def _canonical_json(self) -> str:
+        # Safe to cache: Finding is frozen, and cached_property writes to __dict__
+        # directly (not a dataclass field, so eq/hash/replace are unaffected).
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
 
     def to_dict(self) -> dict[str, Any]:

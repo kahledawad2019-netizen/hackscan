@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import io
+import tokenize
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -49,7 +51,13 @@ def analyze_source(source: str, rel_path: str, plugins: Sequence[RulePlugin]) ->
                 result.errors.append(f"{rel_path}:{line}: rule {plugin.rule_id} failed: {exc}")
                 continue
             for match in matches:
-                result.findings.append(_to_finding(match, plugin, ctx, qualnames))
+                try:
+                    result.findings.append(_to_finding(match, plugin, ctx, qualnames))
+                except Exception as exc:  # malformed match from a (user) plugin
+                    line = getattr(node, "lineno", "?")
+                    result.errors.append(
+                        f"{rel_path}:{line}: rule {plugin.rule_id} returned a bad match: {exc}"
+                    )
     result.findings.sort(key=Finding.sort_key)
     return result
 
@@ -57,8 +65,11 @@ def analyze_source(source: str, rel_path: str, plugins: Sequence[RulePlugin]) ->
 def analyze_file(path: Path, root: Path, plugins: Sequence[RulePlugin]) -> FileResult:
     rel_path = path.relative_to(root).as_posix()
     try:
-        source = path.read_bytes().decode("utf-8-sig")
-    except (OSError, UnicodeDecodeError) as exc:
+        data = path.read_bytes()
+        # Honors PEP 263 coding declarations and BOMs, defaulting to UTF-8.
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
+        source = data.decode(encoding)
+    except (OSError, SyntaxError, UnicodeDecodeError, LookupError) as exc:
         return FileResult(path=rel_path, errors=[f"{rel_path}: cannot read: {exc}"])
     return analyze_source(source, rel_path, plugins)
 
@@ -67,6 +78,8 @@ def _to_finding(
     match: Match, plugin: RulePlugin, ctx: FileContext, qualnames: dict[int, str]
 ) -> Finding:
     node = match.node
+    if not isinstance(node, ast.AST) or not hasattr(node, "lineno"):
+        raise TypeError(f"match node must be a located AST node, got {type(node).__name__}")
     start_line = node.lineno
     end_line = node.end_lineno or start_line
     region = Region(

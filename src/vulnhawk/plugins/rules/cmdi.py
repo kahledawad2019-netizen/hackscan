@@ -1,4 +1,8 @@
-"""Command injection: non-constant commands run through a shell."""
+"""Command injection: non-constant commands run through a shell.
+
+Any non-constant command at a shell sink is a candidate; the taint pass decides whether
+it is attacker-controlled, constant or sanitized.
+"""
 
 from __future__ import annotations
 
@@ -60,18 +64,11 @@ class CommandInjection(RulePlugin):
         command = first_arg(node, "args") or first_arg(node, "cmd")
         if command is None or is_constant(command):
             return
-        if isinstance(command, ast.Name):
-            values = ctx.assignments_before(command.id, node)
-            if values and all(is_constant(v) for v in values):
-                return
-            dynamic = any(is_dynamic_string(v) for v in values)
-            yield Match(
-                node,
-                f"Command `{command.id}` is executed via {via}.",
-                confidence=65 if dynamic else 50,
-            )
-            return
-        yield Match(node, f"Non-constant command is executed via {via}.")
+        if is_dynamic_string(command):
+            yield Match(node, f"Command built from non-constant parts is executed via {via}.")
+        else:
+            label = ctx.segment(command)
+            yield Match(node, f"Non-constant command `{label}` is executed via {via}.", 50)
 
 
 def _shell_enabled(call: ast.Call) -> bool:

@@ -21,7 +21,7 @@ def no_shell_kwarg(path):
 
 def constant_variable():
     cmd = "uptime"
-    subprocess.call(cmd, shell=True)
+    subprocess.call(cmd, shell=True)  # expect-suppressed: VH-CMDI-001 taint:constant_input
 
 
 def quoted_list(name):
@@ -30,3 +30,15 @@ def quoted_list(name):
 
 def unrelated_system(machine):
     machine.system("reboot " + machine.name)
+
+
+def parameter_shadows_os(os, cmd):
+    os.system(cmd)  # `os` here is a parameter, not the os module
+
+
+def local_import_elsewhere():
+    from os import system  # noqa: F401  (binds `system` only in this function)
+
+
+def unrelated_system_name(system, cmd):
+    system(cmd)

@@ -7,11 +7,13 @@ it is strictly opt-in.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import inspect
 import sys
 from pathlib import Path
 
+from vulnhawk.core.models import Severity
 from vulnhawk.plugins.base import RulePlugin
 from vulnhawk.plugins.rules.cmdi import CommandInjection
 from vulnhawk.plugins.rules.codei import CodeInjection
@@ -62,9 +64,24 @@ def load_plugins(directory: Path) -> list[RulePlugin]:
 
 
 def _validated(plugin: RulePlugin, path: Path) -> RulePlugin:
-    for attr in ("rule_id", "name", "description", "severity"):
-        if not hasattr(plugin, attr):
-            raise PluginError(f"{path.name}: {type(plugin).__name__} is missing `{attr}`")
+    cls = type(plugin).__name__
+    for attr in ("rule_id", "name", "description"):
+        value = getattr(plugin, attr, None)
+        if not isinstance(value, str) or not value.strip():
+            raise PluginError(f"{path.name}: {cls}.{attr} must be a non-empty string")
+    if not isinstance(getattr(plugin, "severity", None), Severity):
+        raise PluginError(f"{path.name}: {cls}.severity must be a vulnhawk Severity")
+    node_types = getattr(plugin, "node_types", None)
+    if (
+        not isinstance(node_types, tuple)
+        or not node_types
+        or not all(isinstance(t, type) and issubclass(t, ast.AST) for t in node_types)
+    ):
+        raise PluginError(f"{path.name}: {cls}.node_types must be a tuple of ast node classes")
+    if not isinstance(plugin.cwe, tuple) or not all(isinstance(c, str) for c in plugin.cwe):
+        raise PluginError(f"{path.name}: {cls}.cwe must be a tuple of strings")
+    if not isinstance(plugin.default_confidence, int) or not 0 <= plugin.default_confidence <= 100:
+        raise PluginError(f"{path.name}: {cls}.default_confidence must be an int 0-100")
     if plugin.rule_id.startswith("VH-"):
         raise PluginError(f"{path.name}: rule id prefix `VH-` is reserved for built-in rules")
     return plugin

@@ -23,18 +23,31 @@ class WeakHash(RulePlugin):
     def check(self, node: ast.AST, ctx: FileContext) -> Iterable[Match]:
         assert isinstance(node, ast.Call)
         name = ctx.call_name(node)
+        confidence = None
         if name in WEAK_CONSTRUCTORS:
             algorithm = WEAK_CONSTRUCTORS[name]
         elif name == "hashlib.new":
             arg = first_arg(node, "name")
-            if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+            literals = [arg]
+            if isinstance(arg, ast.Name):
+                # Find a literal algorithm name bound locally (never used to dismiss).
+                literals = ctx.assignments_before(arg.id, node)
+                confidence = 60
+            weak = sorted({_normalize(v.value) for v in literals if _is_str(v)} & WEAK_ALGORITHMS)
+            if not weak:
                 return
-            algorithm = arg.value.lower().replace("-", "")
-            if algorithm not in WEAK_ALGORITHMS:
-                return
+            algorithm = weak[0]
         else:
             return
         flag = keyword(node, "usedforsecurity")
         if isinstance(flag, ast.Constant) and flag.value is False:
             return
-        yield Match(node, f"Weak hash algorithm {algorithm.upper()} is used.")
+        yield Match(node, f"Weak hash algorithm {algorithm.upper()} is used.", confidence)
+
+
+def _is_str(node: ast.AST | None) -> bool:
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+
+def _normalize(name: str) -> str:
+    return name.lower().replace("-", "").replace("_", "")

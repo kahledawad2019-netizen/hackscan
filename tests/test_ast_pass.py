@@ -170,3 +170,74 @@ def test_match_confidence_override():
 
     (f,) = analyze_source("x\n", "a.py", [Fixed()]).findings
     assert f.confidence == 12
+
+
+def test_decorator_sink_attributed_to_enclosing_function():
+    result = scan(
+        """
+        def outer(src):
+            @deco(eval(src))
+            def inner():
+                pass
+        """
+    )
+    (f,) = result.findings
+    assert f.function == "outer"
+
+
+def test_declared_source_encoding_is_honored(tmp_path: Path):
+    path = tmp_path / "legacy.py"
+    path.write_bytes("# -*- coding: latin-1 -*-\nx = 'café'\neval(y)\n".encode("latin-1"))
+    result = analyze_file(path, tmp_path, builtin_plugins())
+    assert not result.errors
+    assert [f.rule_id for f in result.findings] == ["VH-CODEI-001"]
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ("rule_id = ''", "rule_id must be a non-empty string"),
+        ("severity = 'high'", "severity must be a vulnhawk Severity"),
+        ("node_types = ast.Call", "node_types must be a tuple"),
+        ("node_types = (str,)", "node_types must be a tuple"),
+        ("cwe = 'CWE-1'", "cwe must be a tuple"),
+        ("default_confidence = 500", "default_confidence"),
+    ],
+)
+def test_malformed_plugin_attributes_rejected(tmp_path: Path, body: str, message: str):
+    (tmp_path / "p.py").write_text(
+        textwrap.dedent(
+            f"""
+            import ast
+            from vulnhawk.core.models import Severity
+            from vulnhawk.plugins import RulePlugin
+
+            class P(RulePlugin):
+                rule_id = "ACME-1"
+                name = "p"
+                description = "d"
+                severity = Severity.LOW
+                {body}
+
+                def check(self, node, ctx):
+                    return []
+            """
+        )
+    )
+    with pytest.raises(PluginError, match=message):
+        load_plugins(tmp_path)
+
+
+def test_bad_match_node_is_reported_not_raised():
+    class BadMatch(RulePlugin):
+        rule_id = "X-BAD"
+        name = "bad"
+        description = "x"
+        severity = Severity.LOW
+
+        def check(self, node, ctx):
+            yield Match("not a node", "oops")  # type: ignore[arg-type]
+
+    result = analyze_source("eval(x)\n", "a.py", [BadMatch(), *builtin_plugins()])
+    assert [f.rule_id for f in result.findings] == ["VH-CODEI-001"]
+    assert "X-BAD returned a bad match" in result.errors[0]

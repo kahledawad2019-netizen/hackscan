@@ -35,3 +35,9 @@ def getoutput(arg):
 
 def keyword_args(target):
     subprocess.Popen(args="rm -rf " + target, shell=True)  # expect: VH-CMDI-001
+
+
+def dead_constant_branch(cmd):
+    if False:
+        cmd = "ls"
+    os.system(cmd)  # expect: VH-CMDI-001

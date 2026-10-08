@@ -1,4 +1,7 @@
-"""Code injection: non-constant input to eval/exec/compile."""
+"""Code injection: non-constant input to eval/exec/compile.
+
+Any non-constant argument is a candidate; the taint pass decides.
+"""
 
 from __future__ import annotations
 
@@ -6,9 +9,18 @@ import ast
 from collections.abc import Iterable
 
 from vulnhawk.core.models import Severity
-from vulnhawk.plugins.base import FileContext, Match, RulePlugin, first_arg, is_constant
+from vulnhawk.plugins.base import (
+    FileContext,
+    Match,
+    RulePlugin,
+    first_arg,
+    is_constant,
+    is_dynamic_string,
+)
 
-CODE_FUNCTIONS = frozenset({"eval", "exec", "compile", "builtins.eval", "builtins.exec"})
+CODE_FUNCTIONS = frozenset(
+    {"eval", "exec", "compile", "builtins.eval", "builtins.exec", "builtins.compile"}
+)
 
 
 class CodeInjection(RulePlugin):
@@ -28,10 +40,8 @@ class CodeInjection(RulePlugin):
         if code is None or is_constant(code):
             return
         func = name.rsplit(".", 1)[-1]
-        if isinstance(code, ast.Name):
-            values = ctx.assignments_before(code.id, node)
-            if values and all(is_constant(v) for v in values):
-                return
-            yield Match(node, f"`{code.id}` is passed to {func}().", confidence=55)
-            return
-        yield Match(node, f"Non-constant expression is passed to {func}().")
+        if is_dynamic_string(code):
+            yield Match(node, f"String built from non-constant parts is passed to {func}().")
+        else:
+            label = ctx.segment(code)
+            yield Match(node, f"Non-constant `{label}` is passed to {func}().", confidence=55)

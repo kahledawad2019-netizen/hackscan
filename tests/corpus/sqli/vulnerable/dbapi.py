@@ -52,3 +52,21 @@ def pandas_sql(conn, region):
 
 def django_raw(User, username):
     return User.objects.raw(f"SELECT * FROM auth_user WHERE username = '{username}'")  # expect: VH-SQLI-001
+
+
+def template_percent(cur, template, user):
+    cur.execute(template % user)  # expect: VH-SQLI-001
+
+
+def template_format(cur, template, user):
+    cur.execute(template.format(user))  # expect: VH-SQLI-001
+
+
+def unresolved_variable(cur, query):
+    cur.execute(query)  # expect: VH-SQLI-001
+
+
+def chained_connect(path, uid):
+    import sqlite3
+
+    sqlite3.connect(path).execute("DELETE FROM t WHERE id = " + uid)  # expect: VH-SQLI-001

@@ -1,50 +1,112 @@
-"""SQL injection: dynamically built SQL passed to a DB execution sink."""
+"""SQL injection: non-constant SQL reaching a DB execution sink.
+
+Candidates:
+- string formatting/concatenation at the sink, when the receiver looks like a DB object
+  or the literal parts look like SQL (confidence 70);
+- any other non-constant query (variable, call result, attribute) passed to a DB-looking
+  receiver (confidence 40). The taint pass confirms or suppresses these.
+"""
 
 from __future__ import annotations
 
 import ast
+import re
 from collections.abc import Iterable
 
 from vulnhawk.core.models import Severity
-from vulnhawk.plugins.base import FileContext, Match, RulePlugin, first_arg, is_dynamic_string
+from vulnhawk.plugins.base import (
+    FileContext,
+    Match,
+    RulePlugin,
+    first_arg,
+    has_sql_text,
+    is_constant,
+    is_string_formatting,
+)
 
 # Method names that execute raw SQL on DB-API cursors/connections, Django and pandas.
 SQL_METHODS = frozenset(
     {"execute", "executemany", "executescript", "raw", "read_sql", "read_sql_query"}
 )
-# Fully-qualified functions that wrap raw SQL text.
-SQL_FUNCTIONS = frozenset({"sqlalchemy.text", "sqlalchemy.sql.text", "pandas.read_sql"})
+# Fully-qualified functions that take raw SQL text.
+SQL_FUNCTIONS = frozenset(
+    {"sqlalchemy.text", "sqlalchemy.sql.text", "pandas.read_sql", "pandas.read_sql_query"}
+)
+DB_MODULES = (
+    "sqlite3",
+    "psycopg2",
+    "psycopg",
+    "pymysql",
+    "MySQLdb",
+    "mysql.connector",
+    "cx_Oracle",
+    "oracledb",
+    "sqlalchemy",
+    "django.db",
+    "asyncpg",
+    "aiosqlite",
+)
+_DB_NAME_RE = re.compile(
+    r"(^|_)(cur|curs|cursor|conn|connection|db|database|session|engine|objects|tx|transaction)s?$",
+    re.IGNORECASE,
+)
 
 
 class SqlInjection(RulePlugin):
     rule_id = "VH-SQLI-001"
     name = "sql-injection"
-    description = "SQL query built from dynamic strings is passed to a database execution call."
+    description = "Non-constant SQL is passed to a database execution call."
     severity = Severity.HIGH
     cwe = ("CWE-89",)
     default_confidence = 70
 
     def check(self, node: ast.AST, ctx: FileContext) -> Iterable[Match]:
         assert isinstance(node, ast.Call)
-        if not _is_sql_sink(node, ctx):
+        name = ctx.call_name(node)
+        strong = name in SQL_FUNCTIONS
+        method = isinstance(node.func, ast.Attribute) and node.func.attr in SQL_METHODS
+        if not (strong or method):
             return
         query = first_arg(node, "sql") or first_arg(node, "query")
-        if query is None:
+        if query is None or is_constant(query):
             return
-        if is_dynamic_string(query):
-            yield Match(node, "SQL query is built with string formatting/concatenation.")
-        elif isinstance(query, ast.Name) and any(
-            is_dynamic_string(v) for v in ctx.assignments_before(query.id, node)
-        ):
+        if isinstance(query, ast.Call) and ctx.call_name(query) in SQL_FUNCTIONS:
+            return  # e.g. session.execute(text(...)): reported at the inner text() call
+        db_receiver = strong or _is_db_receiver(node.func, ctx)
+
+        if is_string_formatting(query):
+            if db_receiver or has_sql_text(query):
+                yield Match(node, "SQL query is built with string formatting/concatenation.")
+            return
+        if db_receiver:
             yield Match(
                 node,
-                f"SQL query `{query.id}` is built with string formatting/concatenation.",
-                confidence=60,
+                f"Non-constant query `{_short(ctx.segment(query))}` reaches a SQL sink.",
+                confidence=40,
             )
 
 
-def _is_sql_sink(call: ast.Call, ctx: FileContext) -> bool:
-    name = ctx.call_name(call)
-    if name in SQL_FUNCTIONS:
-        return True
-    return isinstance(call.func, ast.Attribute) and call.func.attr in SQL_METHODS
+def _is_db_receiver(func: ast.expr, ctx: FileContext) -> bool:
+    if not isinstance(func, ast.Attribute):
+        return False
+    receiver = func.value
+    # sqlite3.connect(...).execute(...), psycopg.connect(...).cursor().execute(...)
+    root = receiver
+    while isinstance(root, (ast.Call, ast.Attribute)):
+        if isinstance(root, ast.Call):
+            resolved = ctx.call_name(root)
+            if resolved and resolved.startswith(DB_MODULES):
+                return True
+            root = root.func
+        else:
+            root = root.value
+    last = receiver
+    if isinstance(last, ast.Call):
+        last = last.func
+    ident = last.attr if isinstance(last, ast.Attribute) else getattr(last, "id", "")
+    return bool(_DB_NAME_RE.search(ident))
+
+
+def _short(text: str, limit: int = 40) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"

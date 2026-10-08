@@ -14,10 +14,17 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 
 from vulnhawk.core.models import Severity
+from vulnhawk.plugins.scopes import ScopeIndex
 
 _NEWLINE_RE = re.compile(r"\r\n|\r|\n")
 
 FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+
+SQL_KEYWORD_RE = re.compile(
+    r"^\s*(select|insert|update|delete|with|create|drop|alter|replace|merge|truncate|grant)\b"
+    r"|\b(from|where|order\s+by|group\s+by|values|into|join|set)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -43,31 +50,34 @@ class RulePlugin(ABC):
 
 @dataclass
 class FileContext:
-    """Parsed file plus the lookups rules need: import aliases, scopes, local assignments."""
+    """Parsed file plus the lookups rules need: scoped name resolution and source text.
+
+    Data-flow questions (is this variable constant/sanitized/tainted?) are deliberately
+    *not* answered here: rules report candidates, the taint pass (M2) decides.
+    """
 
     path: str  # POSIX, relative to scan root
     source: str
     tree: ast.Module
     lines: list[str] = field(init=False)
-    aliases: dict[str, str] = field(init=False)
-    _scopes: dict[int, FunctionNode | None] = field(init=False)
+    scopes: ScopeIndex = field(init=False)
 
     def __post_init__(self) -> None:
         self.lines = _NEWLINE_RE.split(self.source)
-        self.aliases = _collect_aliases(self.tree)
-        self._scopes = {}
-        _index_scopes(self.tree, None, self._scopes)
+        self.scopes = ScopeIndex(self.tree)
 
     # -- names -------------------------------------------------------------------------
 
     def resolve(self, expr: ast.AST) -> str | None:
-        """Dotted name of `expr` with import aliases expanded.
+        """Dotted name of `expr`, resolved in the scope where `expr` appears.
 
         `sp.run` after `import subprocess as sp` -> `subprocess.run`;
         `system` after `from os import system` -> `os.system`; builtins stay bare.
+        Local values (parameters, assignments) resolve to None: `os.system` where `os`
+        is a parameter is not the `os` module.
         """
         if isinstance(expr, ast.Name):
-            return self.aliases.get(expr.id, expr.id)
+            return self.scopes.resolve_name(expr.id, expr)
         if isinstance(expr, ast.Attribute):
             base = self.resolve(expr.value)
             return f"{base}.{expr.attr}" if base else None
@@ -79,13 +89,13 @@ class FileContext:
     # -- scopes ------------------------------------------------------------------------
 
     def enclosing_function(self, node: ast.AST) -> FunctionNode | None:
-        return self._scopes.get(id(node))
+        return self.scopes.enclosing_function(node)  # type: ignore[return-value]
 
     def assignments_before(self, name: str, node: ast.AST) -> list[ast.expr]:
-        """Values assigned to local `name` before `node`, in the same function (or module).
+        """Values assigned to local `name` textually before `node` in the same scope.
 
-        Includes `x = ...`, `x += ...` (the right-hand side) and annotated assignments.
-        Nested function bodies are excluded.
+        Flow-insensitive: use only to *find* candidate values (e.g. a literal algorithm
+        name), never to dismiss a finding.
         """
         scope = self.enclosing_function(node) or self.tree
         line = getattr(node, "lineno", 0)
@@ -103,14 +113,6 @@ class FileContext:
             ):
                 values.append(stmt.value)
         return values
-
-    def is_parameter(self, name: str, node: ast.AST) -> bool:
-        func = self.enclosing_function(node)
-        if func is None:
-            return False
-        args = func.args
-        all_args = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
-        return any(a is not None and a.arg == name for a in all_args)
 
     # -- source text -------------------------------------------------------------------
 
@@ -175,6 +177,33 @@ def is_dynamic_string(expr: ast.AST) -> bool:
     return False
 
 
+def is_string_formatting(expr: ast.AST) -> bool:
+    """Looser than `is_dynamic_string`: also `%`/`.format()` applied to a template
+    variable (`template % user`, `template.format(user)`). Only meaningful at sinks
+    that expect a string, since `a % b` is also integer modulo."""
+    if is_dynamic_string(expr):
+        return True
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Mod):
+        return not is_constant(expr.right)
+    if (
+        isinstance(expr, ast.Call)
+        and isinstance(expr.func, ast.Attribute)
+        and expr.func.attr in {"format", "format_map"}
+    ):
+        return any(not is_constant(a) for a in [*expr.args, *(k.value for k in expr.keywords)])
+    return False
+
+
+def has_sql_text(expr: ast.AST) -> bool:
+    """Any string literal inside `expr` that looks like SQL."""
+    return any(
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and SQL_KEYWORD_RE.search(node.value)
+        for node in ast.walk(expr)
+    )
+
+
 def keyword(call: ast.Call, name: str) -> ast.expr | None:
     return next((k.value for k in call.keywords if k.arg == name), None)
 
@@ -186,36 +215,6 @@ def first_arg(call: ast.Call, kw: str | None = None) -> ast.expr | None:
 
 
 # -- internals ----------------------------------------------------------------------------
-
-
-def _collect_aliases(tree: ast.Module) -> dict[str, str]:
-    aliases: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for a in node.names:
-                if a.asname:
-                    aliases[a.asname] = a.name
-                else:
-                    top = a.name.split(".")[0]
-                    aliases[top] = top
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            for a in node.names:
-                if a.name != "*":
-                    aliases[a.asname or a.name] = f"{node.module}.{a.name}"
-    return aliases
-
-
-def _index_scopes(
-    node: ast.AST, current: FunctionNode | None, out: dict[int, FunctionNode | None]
-) -> None:
-    for child in ast.iter_child_nodes(node):
-        out[id(child)] = current
-        inner = (
-            child
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
-            else current
-        )
-        _index_scopes(child, inner, out)
 
 
 def _walk_same_scope(scope: ast.AST) -> Iterator[ast.AST]:

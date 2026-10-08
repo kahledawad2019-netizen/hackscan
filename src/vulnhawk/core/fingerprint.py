@@ -16,6 +16,7 @@ import re
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import replace
+from functools import lru_cache
 
 from vulnhawk.core.models import Finding
 
@@ -24,6 +25,7 @@ _HEX_LEN = 32
 _WS_RE = re.compile(r"\s+")
 
 
+@lru_cache(maxsize=65536)
 def normalize_expression(code: str) -> str:
     """Canonical form of a code snippet: formatting- and comment-insensitive when parseable."""
     text = code.strip()
