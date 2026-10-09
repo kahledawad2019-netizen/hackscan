@@ -5,7 +5,7 @@
   "files": 9,
   "tools": {
     "HackScan": {
-      "version": "0.2.0",
+      "version": "0.3.0",
       "skipped": null,
       "scores": {
         "sqli": {
@@ -41,7 +41,7 @@
       }
     },
     "HackScan (confirmed only)": {
-      "version": "0.2.0",
+      "version": "0.3.0",
       "skipped": null,
       "scores": {
         "sqli": {

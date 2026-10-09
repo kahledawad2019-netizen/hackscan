@@ -82,7 +82,7 @@ runs:
         printf 'exit-code=%s\n' "$code" >> "$GITHUB_OUTPUT"
     - name: Upload SARIF
       if: ${{ always() && inputs.upload-sarif == 'true' && steps.scan.outputs.sarif-written == 'true' }}
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: ${{ inputs.sarif-file }}
         category: hackscan

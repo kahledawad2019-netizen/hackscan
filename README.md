@@ -137,8 +137,8 @@ the `p/python` ruleset; CodeQL: `python-security-extended`; HackScan: no options
 
 | Tool | Version | TP | FP | FN | Precision | Recall | F1 |
 |---|---|---:|---:|---:|---:|---:|---:|
-| HackScan | 0.2.0 | 23 | 7 | 3 | 77% | 88% | 82% |
-| HackScan (confirmed only) | 0.2.0 | 18 | 2 | 8 | 90% | 69% | 78% |
+| HackScan | 0.3.0 | 23 | 7 | 3 | 77% | 88% | 82% |
+| HackScan (confirmed only) | 0.3.0 | 18 | 2 | 8 | 90% | 69% | 78% |
 | Bandit | bandit[sarif]==1.9.4 | 24 | 19 | 2 | 56% | 92% | 70% |
 | Semgrep CE | semgrep==1.180.0 (p/python sha256:31c1dfa46e8d) | 16 | 6 | 10 | 73% | 62% | 67% |
 | CodeQL | CodeQL 2.27.2 (codeql/python-queries@1.8.12, security-extended) | 20 | 1 | 6 | 95% | 77% | 85% |
@@ -236,7 +236,7 @@ Python 3.12 on the runner. Without the action:
 ```yaml
 - run: pipx install hackscan
 - run: hackscan scan . --format sarif --sarif-omit-suppressed -o hackscan.sarif --fail-on high
-- uses: github/codeql-action/upload-sarif@v3
+- uses: github/codeql-action/upload-sarif@v4
   if: always()
   with:
     sarif_file: hackscan.sarif

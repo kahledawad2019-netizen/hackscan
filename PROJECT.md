@@ -142,7 +142,7 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 | M2 ✅ | Taint | Framework fixtures (Flask/Django/FastAPI); constant/sanitized flows suppressed; tests for taint boundaries | M1 |
 | M3 ✅ | CLI, SARIF, importers → **v0.1.0 on PyPI** (released 2026-10-08) | `pip install hackscan` works on clean venv; SARIF validates against official schema; `--fail-on` exit codes tested | M2 |
 | M4 ✅ | LLM + remediation + TUI → **v0.2.0** (2026-10-09; 14 Codex gate rounds, double-OK) | All LLM tests run against a mocked Ollama; offline degradation tested; prompt-injection fixture | M3 |
-| M5 🚧 (Action, pre-commit, cross-file taint, benchmark done; release pending) | Inter-procedural taint, benchmark, GitHub Action → v0.3.0 | Benchmark report in README; Action used on the repo itself | M4 |
+| M5 ✅ | Inter-procedural taint, benchmark, GitHub Action → **v0.3.0** (2026-10-09) | Benchmark report in README; Action used on the repo itself | M4 |
 
 ## Test Strategy
 - Corpus: `tests/corpus/<rule>/{vulnerable,safe}/*.py`, each file annotated with expected findings
@@ -447,3 +447,8 @@ hackscan/
   RESULTS.json, APPS.json and the README tables in sync with the engine. Results:
   suite F1 HackScan 82%, CodeQL 85%, Bandit 70%, Semgrep 67%; apps precision/relative
   recall HackScan 83%/71%, CodeQL 100%/67%, Bandit 50%/76%, Semgrep 92%/52%.
+- 2026-10-09 (v0.3.0 release): version 0.3.0; the Action uploads with
+  github/codeql-action/upload-sarif@v4 (v3 is deprecated in December 2026); benchmark
+  re-run so the HackScan rows show 0.3.0 (numbers unchanged). Next ideas (not started):
+  weak-cipher detection (DES/RC4/ECB/unauthenticated modes; largest benchmark gap),
+  taint through `self` attributes, further pass-2 aliasing hardening.
