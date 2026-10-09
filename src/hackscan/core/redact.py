@@ -17,7 +17,7 @@ from __future__ import annotations
 import ast
 import math
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import replace
 
 from hackscan.core.models import Finding
@@ -25,6 +25,7 @@ from hackscan.core.taxonomy import SECRET
 
 REDACTED = "<REDACTED>"
 MIN_SECRET_LENGTH = 4  # shorter "secrets" would redact ordinary text
+MIN_SECRET_PART_LENGTH = 8  # fragments occur in unrelated words more often
 _LITERAL_RE = re.compile(r"""(?P<q>['"])(?:\\.|(?!(?P=q)).)+(?P=q)""")
 # `key = value` / `key: value` / `key=value` (value up to end of line or comment).
 _ASSIGNED_RE = re.compile(r"(?P<key>[=:]\s*)(?P<value>[^\s#'\"][^#]*?)(?P<tail>\s*(?:#.*)?)$")
@@ -55,7 +56,9 @@ def redact_messages(messages: Iterable[str], secrets: Iterable[str]) -> list[str
 
 
 _LINE_END_RE = re.compile(r"\r\n|\r|\n")  # the line breaks `ast` counts
-SECRET_NAME_RE = re.compile(r"(key|token|secret|passw|pwd|credential|auth)", re.I)
+SECRET_NAME_RE = re.compile(
+    r"(key|token|secret|passw|pwd|credential|auth(?!or(?:s|ity)?(?:$|[_\W])))", re.I
+)
 _ASSIGN_LITERAL_RE = re.compile(
     r"""(?P<name>[A-Za-z_][\w.]*)\s*[:=]\s*(?P<q>['"])(?P<value>(?:\\.|(?!(?P=q)).)*)(?P=q)"""
 )
@@ -109,6 +112,61 @@ def _secret_named(target: ast.AST) -> bool:
     return False
 
 
+def _secret_value_nodes(tree: ast.AST) -> Iterator[ast.AST]:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(_secret_named(t) for t in node.targets):
+            yield node.value
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and node.value:
+            if _secret_named(node.target):
+                yield node.value
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            if _secret_named(node.target):  # `for api_token in ("...",)`
+                yield node.iter
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            if _secret_named(node.optional_vars):
+                yield node.context_expr
+        elif isinstance(node, ast.keyword) and node.arg and SECRET_NAME_RE.search(node.arg):
+            yield node.value
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values, strict=True):
+                if (
+                    isinstance(key, ast.Constant)
+                    and isinstance(key.value, str)
+                    and SECRET_NAME_RE.search(key.value)
+                ):
+                    yield value
+
+
+def secret_literal_values(tree: ast.AST) -> set[str]:
+    """Text of secret literals, plus sufficiently long partial pieces and lines."""
+    secrets: set[str] = set()
+    for value in _secret_value_nodes(tree):
+        parents = {
+            id(child): node for node in ast.walk(value) for child in ast.iter_child_nodes(node)
+        }
+        for node in ast.walk(value):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, (str, bytes)):
+                continue
+            literal = (
+                node.value.decode("utf-8", errors="ignore")
+                if isinstance(node.value, bytes)
+                else node.value
+            )
+            minimum = (
+                MIN_SECRET_PART_LENGTH
+                if isinstance(parents.get(id(node)), ast.JoinedStr)
+                else MIN_SECRET_LENGTH
+            )
+            if len(literal) >= minimum:
+                secrets.add(literal)
+            if "\n" in literal or "\r" in literal:
+                for line in literal.splitlines():
+                    line = line.strip()
+                    if len(line) >= MIN_SECRET_PART_LENGTH:
+                        secrets.add(line)
+    return secrets
+
+
 def mask_secret_literals(source: str, tree: ast.AST) -> str:
     """`source` with every string literal assigned to a secret-looking name (`api_key =
     (...)`, `password="..."`, `{"token": ...}`) masked character for character, including
@@ -116,29 +174,6 @@ def mask_secret_literals(source: str, tree: ast.AST) -> str:
 
     Lines and character columns are unchanged, so masked source can be shown as context
     or have fix edits applied to it for a diff."""
-    values: list[ast.AST] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and any(_secret_named(t) for t in node.targets):
-            values.append(node.value)
-        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and node.value:
-            if _secret_named(node.target):
-                values.append(node.value)
-        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
-            if _secret_named(node.target):  # `for api_token in ("...",)`
-                values.append(node.iter)
-        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
-            if _secret_named(node.optional_vars):
-                values.append(node.context_expr)
-        elif isinstance(node, ast.keyword) and node.arg and SECRET_NAME_RE.search(node.arg):
-            values.append(node.value)
-        elif isinstance(node, ast.Dict):
-            values.extend(
-                v
-                for k, v in zip(node.keys, node.values, strict=True)
-                if isinstance(k, ast.Constant)
-                and isinstance(k.value, str)
-                and SECRET_NAME_RE.search(k.value)
-            )
     starts = [0] + [m.end() for m in _LINE_END_RE.finditer(source)]
 
     def offset(line: int, byte_col: int) -> int:  # AST (line, UTF-8 column) -> str index
@@ -148,7 +183,7 @@ def mask_secret_literals(source: str, tree: ast.AST) -> str:
         return base + len(prefix.decode("utf-8", errors="ignore"))
 
     chars = list(source)
-    for value in values:
+    for value in _secret_value_nodes(tree):
         for lit in ast.walk(value):
             if isinstance(lit, ast.JoinedStr) or (
                 isinstance(lit, ast.Constant) and isinstance(lit.value, (str, bytes))

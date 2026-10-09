@@ -16,6 +16,7 @@ from urllib.parse import unquote, urlparse
 
 from hackscan.analyzers.ast_pass import _qualnames
 from hackscan.core.models import Region, Severity
+from hackscan.core.redact import redact_code, secret_literal_values
 from hackscan.plugins.base import FileContext
 
 
@@ -109,6 +110,7 @@ class SourceIndex:
     def __init__(self, root: Path) -> None:
         self.root = root
         self._cache: dict[str, tuple[FileContext, dict[int, str]] | None] = {}
+        self.secret_values: set[str] = set()
 
     def context(self, rel_path: str) -> tuple[FileContext, dict[int, str]] | None:
         if rel_path not in self._cache:
@@ -128,6 +130,7 @@ class SourceIndex:
                 tree = ast.parse(source)
         except (OSError, SyntaxError, UnicodeDecodeError, LookupError, ValueError):
             return None
+        self.secret_values.update(secret_literal_values(tree))
         return FileContext(path=rel_path, source=source, tree=tree), _qualnames(tree)
 
     def line_text(self, rel_path: str, line: int) -> str:
@@ -138,7 +141,7 @@ class SourceIndex:
         try:
             lines = (self.root / rel_path).read_text(encoding="utf-8", errors="replace")
             split = lines.splitlines()
-            return split[line - 1] if 0 < line <= len(split) else ""
+            return redact_code(split[line - 1], ()) if 0 < line <= len(split) else ""
         except OSError:
             return ""
 

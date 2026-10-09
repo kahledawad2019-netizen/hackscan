@@ -293,7 +293,7 @@ def _argv(expr: ast.AST, ctx: FileContext) -> list[str] | None:
 # `tar --to-command`, `sort --compress-program`, `find -exec`, `rg --pre`), so an
 # allowlist, not a denylist.
 INERT_PROGRAMS = {
-    "echo", "printf", "cat", "tac", "nl", "ls", "dir", "head", "tail", "wc", "cut",
+    "printf", "cat", "tac", "nl", "ls", "head", "tail", "wc", "cut",
     "grep", "egrep", "fgrep", "file", "stat", "du", "df", "basename", "dirname",
     "realpath", "readlink", "which", "whoami", "id", "ping", "host", "dig", "nslookup",
 }  # fmt: skip

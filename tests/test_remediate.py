@@ -252,8 +252,8 @@ def test_in_list_is_not_parameterized(tmp_path: Path):
 def test_fstring_argv_values_are_stringified_and_run(tmp_path: Path):
     import subprocess
 
-    _, new = fixed_source(tmp_path, 'import os\n\ndef f(n):\n    return os.system(f"echo {n}")\n')
-    assert "subprocess.call(['echo', str(n)])" in new
+    _, new = fixed_source(tmp_path, 'import os\n\ndef f(n):\n    return os.system(f"cat {n}")\n')
+    assert "subprocess.call(['cat', str(n)])" in new
     namespace: dict = {}
     calls = []
     exec(compile(new, "m.py", "exec"), namespace)
@@ -261,8 +261,16 @@ def test_fstring_argv_values_are_stringified_and_run(tmp_path: Path):
         "S", (), {"call": staticmethod(lambda argv: calls.append(argv) or 0)}
     )
     namespace["f"](3)  # an int used to raise TypeError inside subprocess
-    assert calls == [["echo", "3"]] and all(isinstance(a, str) for a in calls[0])
+    assert calls == [["cat", "3"]] and all(isinstance(a, str) for a in calls[0])
     assert subprocess  # real module untouched
+
+
+@pytest.mark.parametrize("program", ["echo", "dir"])
+def test_cmd_builtins_get_no_shellless_fix(tmp_path: Path, program: str):
+    _, findings = fixes_for(
+        tmp_path, f'import os\n\ndef f(x):\n    os.system(f"{program} {{x}}")\n'
+    )
+    assert findings and all(f.fix is None for f in findings)
 
 
 def test_import_insertion_keeps_shebang_and_coding_cookie(tmp_path: Path):

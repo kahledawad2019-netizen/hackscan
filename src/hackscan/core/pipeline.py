@@ -54,9 +54,11 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
     results = _analyze(files, root, plugins, config)
     findings: list[Finding] = []
     errors: list[str] = []
+    known_secrets: set[str] = set()
     for result in results:
         findings.extend(result.findings)
         errors.extend(result.errors)
+        known_secrets.update(result.secrets)
 
     index = SourceIndex(root)
     external = collect(
@@ -72,7 +74,9 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
         f for f in external.findings if not is_ignored_path(f.location.path, config.ignore)
     )
 
-    final = assign_ids(redact_findings(merge_findings(findings), external.secrets))
+    known_secrets.update(index.secret_values)
+    known_secrets.update(external.secrets)
+    final = assign_ids(redact_findings(merge_findings(findings), known_secrets))
     if config.fixes:
         final = generate_fixes(final, index)
     warnings = list(external.warnings)
@@ -89,13 +93,13 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
                 allow_suppress=config.llm_suppress,
                 cache_dir=default_cache_dir(),
             ),
-            secrets=external.secrets,
+            secrets=known_secrets,
             rescan=lambda source, path: (
                 analyze_source(source, path, plugins, taint=config.taint).findings
             ),
         )
         # Model text is untrusted too: redact again before anything is printed.
-        final = redact_findings(report.findings, external.secrets)
+        final = redact_findings(report.findings, known_secrets)
         warnings.extend(report.warnings)
         llm_reviewed = report.reviewed
     return ScanResult(
@@ -103,10 +107,10 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
         findings=final,
         files_scanned=len(files),
         duration_seconds=time.perf_counter() - started,
-        errors=redact_messages([*sorted(errors), *external.errors], external.secrets),
-        warnings=redact_messages(warnings, external.secrets),
+        errors=redact_messages([*sorted(errors), *external.errors], known_secrets),
+        warnings=redact_messages(warnings, known_secrets),
         llm_reviewed=llm_reviewed,
-        secrets=frozenset(external.secrets),
+        secrets=frozenset(known_secrets),
         tool_runs=external.runs,
     )
 

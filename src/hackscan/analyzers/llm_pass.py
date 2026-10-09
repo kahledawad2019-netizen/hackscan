@@ -379,7 +379,7 @@ def verify_evidence(ctx: FileContext, finding: Finding, line: int, kind: str) ->
         )
         covered = {target.id}
     elif kind == "guard":
-        covered = _allow_list_guard(stmt)
+        covered = _allow_list_guard(stmt, finding.vuln_class)
         ok = bool(covered) and sink_names <= covered
     else:
         return False
@@ -495,7 +495,7 @@ def _is_class_sanitizer(expr: ast.AST, ctx: FileContext, vuln_class: str) -> boo
 _SAFE_PREDICATES = {"isdigit", "isdecimal", "isnumeric", "isalnum", "isalpha", "isidentifier"}
 
 
-def _allow_list_guard(stmt: ast.stmt) -> set[str]:
+def _allow_list_guard(stmt: ast.stmt, vuln_class: str) -> set[str]:
     """Names an allow-list guard restricts, or an empty set if `stmt` is not one."""
     # `assert` is never evidence: `python -O` removes it.
     if isinstance(stmt, ast.If) and not stmt.orelse and _exits(stmt.body):
@@ -520,7 +520,10 @@ def _allow_list_guard(stmt: ast.stmt) -> set[str]:
         and isinstance(test.ops[0], ast.In)
         and isinstance(test.left, ast.Name)
         and isinstance(test.comparators[0], (ast.Set, ast.List, ast.Tuple))
-        and all(isinstance(e, ast.Constant) for e in test.comparators[0].elts)
+        and all(
+            isinstance(e, ast.Constant) and _inert_allow_value(e.value, vuln_class)
+            for e in test.comparators[0].elts
+        )
     ):
         return {test.left.id}
     # `x.isdigit()` and friends: no shell, SQL or code metacharacters can pass
@@ -533,6 +536,20 @@ def _allow_list_guard(stmt: ast.stmt) -> set[str]:
     ):
         return {test.func.value.id}
     return set()
+
+
+def _inert_allow_value(value: object, vuln_class: str) -> bool:
+    if type(value) is int:
+        return True
+    if type(value) is not str or value.startswith("-"):
+        return False
+    if re.fullmatch(r"[A-Za-z0-9_.:@/+=,]*", value) is None:
+        return False
+    if vuln_class == "codei":
+        return bool(re.fullmatch(r"[0-9]+", value)) or (
+            value.isidentifier() and not (value.startswith("__") and value.endswith("__"))
+        )
+    return True
 
 
 def _exits(body: list[ast.stmt]) -> bool:

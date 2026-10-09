@@ -225,6 +225,39 @@ def test_verify_evidence_rejects(tmp_path, body, line, kind):
     assert not evidence_ok(tmp_path, body, line, kind)
 
 
+@pytest.mark.parametrize(
+    "allowed",
+    ['";echo PWN"', '"a b"', '"-rf"', '"x\'"', 'b"ls"', "None", "1.5", "True"],
+)
+def test_allow_list_rejects_unsafe_constants(tmp_path, allowed):
+    body = f"    if cmd not in {{{allowed}}}:\n        return\n"
+    assert not evidence_ok(tmp_path, body, 4, "guard")
+
+
+@pytest.mark.parametrize("allowed", ['"nginx", "redis"', "1, 2"])
+def test_allow_list_accepts_inert_constants(tmp_path, allowed):
+    body = f"    if cmd not in {{{allowed}}}:\n        return\n"
+    assert evidence_ok(tmp_path, body, 4, "guard")
+
+
+def test_codei_allow_list_rejects_dunder_name(tmp_path):
+    code = 'def run(value):\n    if value not in {"__import__"}:\n        return\n    eval(value)\n'
+    findings, index = setup(tmp_path, code)
+    ctx, _ = index.context("m.py")
+    (finding,) = [f for f in findings if f.vuln_class == "codei"]
+    assert not verify_evidence(ctx, finding, 2, "guard")
+
+
+def test_shell_metacharacter_allow_list_cannot_suppress(tmp_path):
+    code = (
+        'import os\n\ndef run(x):\n    if x not in {";echo PWN"}:\n'
+        '        return\n    os.system("echo " + x)\n'
+    )
+    report = run(tmp_path, code, FakeOllama(answer("false_positive", line=4, kind="guard")))
+    (finding,) = report.findings
+    assert finding.status is Status.CANDIDATE
+
+
 def test_unverifiable_guard_never_suppresses_through_triage(tmp_path):
     code = (
         "import os\n\ndef run(cmd):\n    if len(cmd) > 100:\n        return\n    os.system(cmd)\n"

@@ -175,13 +175,15 @@ class PickleLoads(RulePlugin):
 - Python only. Imported tools may cover other languages; their findings are passed through.
 - Fix suggestions are deliberately conservative: many vulnerable lines get none. Command
   fixes (argument lists) are only offered for programs whose arguments are inert data
-  (`echo`, `cat`, `ls`, `grep`, `head`, ...): many others run operands or options as
+  (`cat`, `ls`, `grep`, `head`, ...): many others run operands or options as
   commands (`sh -c`, `npx PKG`, `git -c alias=!cmd`, `tar --to-command`). They are also
   not offered when a value directly follows a flag; put `--` before operands to get one.
   A value starting with `-` can still be read as an option, so review command fixes. No
   fix is offered for a call that contains a secret, or for SQL containing comments.
-- String literals assigned to secret-looking names (`api_key`, `password`, `token`, ...)
-  are masked in snippets, the LLM context and fix diffs.
+- String and bytes literals assigned to secret-looking names (`api_key`, `password`, `token`, ...)
+  are masked in snippets, the LLM context and fix diffs. Their values are also removed
+  from imported messages and evidence before output or LLM triage. For files that cannot
+  be parsed, fallback snippets conservatively redact literals and assigned values.
 
 ## Development
 

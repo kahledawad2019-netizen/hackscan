@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import shutil
 from pathlib import Path
@@ -9,6 +10,7 @@ import pytest
 from hackscan.config import HackScanConfig
 from hackscan.core.models import Severity, Status
 from hackscan.core.pipeline import scan
+from hackscan.core.redact import SECRET_NAME_RE, mask_secret_literals, secret_literal_values
 from hackscan.importers.common import ReportError, SourceIndex, make_region, normalize_path
 from hackscan.importers.gitleaks import REDACTED, import_gitleaks, load_gitleaks
 from hackscan.importers.runner import collect
@@ -412,3 +414,191 @@ def test_tool_snippet_never_restores_a_masked_secret(tmp_path):
     dumped = json.dumps([f.to_dict() for f in result.findings])
     dumped += json.dumps(export_sarif(result, builtin_plugins()))
     assert token not in dumped
+
+
+@pytest.mark.parametrize("as_bytes", [False, True])
+def test_source_secret_in_tool_message_is_redacted_before_llm(tmp_path, monkeypatch, as_bytes):
+    from hackscan.analyzers.llm_pass import LLMConfig, triage
+    from hackscan.core import pipeline
+    from hackscan.plugins.loader import builtin_plugins
+    from hackscan.sarif.generator import export_sarif
+
+    secret = "bytes-secret-123" if as_bytes else "demo-secret-123"
+    literal = f'{"b" if as_bytes else ""}"{secret}"'
+    (tmp_path / "m.py").write_text(
+        f"import os\n\ndef run(cmd):\n    API_TOKEN = {literal}\n    os.system(cmd)\n",
+        encoding="utf-8",
+    )
+    sarif = {
+        "runs": [
+            {
+                "tool": {"driver": {"name": "Bandit", "rules": [{"id": "B605"}]}},
+                "results": [
+                    {
+                        "ruleId": "B605",
+                        "message": {"text": f"API_TOKEN = {literal} reaches this call"},
+                        "locations": [
+                            {
+                                "physicalLocation": {
+                                    "artifactLocation": {"uri": "m.py"},
+                                    "region": {"startLine": 5},
+                                }
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+    report = tmp_path / "r.sarif"
+    report.write_text(json.dumps(sarif), encoding="utf-8")
+    requests = []
+
+    def fake_transport(url, payload, timeout):
+        requests.append(payload)
+        return {
+            "message": {
+                "content": json.dumps(
+                    {
+                        "verdict": "uncertain",
+                        "reason": "unclear",
+                        "evidence_line": None,
+                        "evidence_kind": None,
+                        "fixed_call": None,
+                    }
+                )
+            }
+        }
+
+    monkeypatch.setattr(
+        pipeline,
+        "triage",
+        lambda findings, index, config, **kwargs: triage(
+            findings,
+            index,
+            LLMConfig(cache_dir=None),
+            transport=fake_transport,
+            **kwargs,
+        ),
+    )
+    result = scan(tmp_path, HackScanConfig(imports=(("bandit", report),), llm=True))
+    dumped = json.dumps([f.to_dict() for f in result.findings])
+    dumped += json.dumps(export_sarif(result, builtin_plugins()))
+    assert requests
+    assert secret not in dumped + json.dumps(requests)
+
+
+def test_secret_literal_values_cover_joined_multiline_and_fstring_parts():
+    tree = ast.parse(
+        'API_TOKEN = ("joined-" "secret")\n'
+        'PASSWORD = """\n  first-secret\n  second-secret\n"""\n'
+        'AUTH_KEY = f"prefix-secret{user}suffix-secret"\n'
+        'API_KEY = "abc"\n'
+    )
+    values = secret_literal_values(tree)
+    assert {
+        "joined-secret",
+        "\n  first-secret\n  second-secret\n",
+        "first-secret",
+        "second-secret",
+        "prefix-secret",
+        "suffix-secret",
+    } <= values
+    assert "abc" not in values
+
+
+def test_secret_literal_values_decode_bytes_and_limit_partial_pieces():
+    tree = ast.parse(
+        'api_key = b"\\xffbytes-secret-123"\n'
+        'password = f"pre-{value}-suffix-secret"\n'
+        'api_token = """small\nlong-secret-123"""\n'
+        'access_key = "four"\n'
+    )
+    values = secret_literal_values(tree)
+    assert {"bytes-secret-123", "-suffix-secret", "long-secret-123", "four"} <= values
+    assert "pre-" not in values
+    assert "small" not in values
+
+
+def test_partial_secret_pieces_need_eight_characters():
+    tree = ast.parse(
+        'password = f"pre-{value}-suffix-secret"\napi_token = """small\nlong-secret-123"""\n'
+    )
+    values = secret_literal_values(tree)
+    assert "pre-" not in values
+    assert "small" not in values
+    assert {"-suffix-secret", "long-secret-123"} <= values
+
+
+@pytest.mark.parametrize(
+    ("name", "secret_named"),
+    [
+        ("auth", True),
+        ("auth_token", True),
+        ("authorization", True),
+        ("oauth", True),
+        ("basic_auth", True),
+        ("AUTH_HEADER", True),
+        ("api_key", True),
+        ("token", True),
+        ("secret", True),
+        ("password", True),
+        ("pwd", True),
+        ("credential", True),
+        ("author", False),
+        ("authors", False),
+        ("authority", False),
+        ("author_name", False),
+        ("authority_code", False),
+    ],
+)
+def test_secret_name_matching_excludes_author_names(name, secret_named):
+    assert bool(SECRET_NAME_RE.search(name)) is secret_named
+
+
+def test_author_assignment_is_not_masked():
+    source = 'author = "Jane Q Public"\n'
+    tree = ast.parse(source)
+    assert mask_secret_literals(source, tree) == source
+    assert "Jane Q Public" not in secret_literal_values(tree)
+
+
+@pytest.mark.parametrize("tool_snippet", [False, True])
+def test_unparseable_python_fallback_snippet_is_redacted(tmp_path, tool_snippet):
+    secret = "loop-secret-12345"
+    (tmp_path / "broken.py").write_text(
+        f'for api_token in ("{secret}",):\n    pass\nif (\n', encoding="utf-8"
+    )
+    region = {"startLine": 1}
+    if tool_snippet:
+        region["snippet"] = {"text": f'for api_token in ("{secret}",):'}
+    report = tmp_path / "r.sarif"
+    report.write_text(
+        json.dumps(
+            {
+                "runs": [
+                    {
+                        "tool": {"driver": {"name": "Bandit"}},
+                        "results": [
+                            {
+                                "ruleId": "B605",
+                                "message": {"text": "possible issue"},
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": "broken.py"},
+                                            "region": region,
+                                        }
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = scan(tmp_path, HackScanConfig(imports=(("bandit", report),)))
+    assert result.findings
+    assert secret not in json.dumps([f.to_dict() for f in result.findings])

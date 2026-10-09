@@ -13,6 +13,7 @@ from pathlib import Path
 from hackscan.analyzers.suppressions import apply_inline_suppressions
 from hackscan.analyzers.taint_pass import apply_taint
 from hackscan.core.models import OWN_SOURCE, Evidence, Finding, Region
+from hackscan.core.redact import secret_literal_values
 from hackscan.core.taxonomy import classify
 from hackscan.plugins.base import FileContext, Match, RulePlugin
 
@@ -24,6 +25,7 @@ class FileResult:
     path: str
     findings: list[Finding] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    secrets: set[str] = field(default_factory=set)
 
 
 def analyze_source(
@@ -40,6 +42,7 @@ def analyze_source(
         result.errors.append(f"{rel_path}: cannot parse: {exc}")
         return result
 
+    result.secrets = secret_literal_values(tree)
     ctx = FileContext(path=rel_path, source=source, tree=tree)
     by_type: dict[type[ast.AST], list[RulePlugin]] = {}
     for plugin in plugins:

@@ -332,3 +332,8 @@ hackscan/
   targets; for parsed Python files the snippet always comes from masked source (a tool's
   SARIF snippet only as a fallback, redacted); LLM evidence quotes masked source. Round 3
   confirmed all earlier fixes and found no regressions (fingerprints, dedupe, pool).
+- 2026-10-09 (security follow-up): LLM allow-list guards require class-safe string or integer
+  constants; source secret literal values now redact imported messages and evidence before
+  output and LLM triage; fallback snippets from unparseable files redact literals and
+  assigned values; `echo` and `dir` no longer get shell-less command fixes because they
+  are Windows cmd.exe builtins.
