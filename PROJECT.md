@@ -129,7 +129,7 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 | 14 | Template + LLM remediation as validated edits; diff view | M4 |
 | 15 | Rich "Matrix" TUI (banner, spinners, tables); auto-off in CI / `--quiet` | M4 |
 | 16 | Inter-procedural & cross-file taint (own call graph from `ast`) | M5 ✅ |
-| 17 | Benchmark harness vs Bandit / Semgrep CE / CodeQL; published precision/recall | M5 |
+| 17 | Benchmark harness vs Bandit / Semgrep CE / CodeQL; published precision/recall | M5 ✅ |
 | 18 | GitHub Action (uploads SARIF to Code Scanning), pre-commit hook | M5 ✅ |
 | 19 | Auth bypass / IDOR heuristics (only if benchmark shows acceptable precision) | Later |
 | 20 | Docker image | Later, on demand |
@@ -142,7 +142,7 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 | M2 ✅ | Taint | Framework fixtures (Flask/Django/FastAPI); constant/sanitized flows suppressed; tests for taint boundaries | M1 |
 | M3 ✅ | CLI, SARIF, importers → **v0.1.0 on PyPI** (released 2026-10-08) | `pip install hackscan` works on clean venv; SARIF validates against official schema; `--fail-on` exit codes tested | M2 |
 | M4 ✅ | LLM + remediation + TUI → **v0.2.0** (2026-10-09; 14 Codex gate rounds, double-OK) | All LLM tests run against a mocked Ollama; offline degradation tested; prompt-injection fixture | M3 |
-| M5 🚧 (Action, pre-commit, cross-file taint done) | Inter-procedural taint, benchmark, GitHub Action → v0.3.0 | Benchmark report in README; Action used on the repo itself | M4 |
+| M5 🚧 (Action, pre-commit, cross-file taint, benchmark done; release pending) | Inter-procedural taint, benchmark, GitHub Action → v0.3.0 | Benchmark report in README; Action used on the repo itself | M4 |
 
 ## Test Strategy
 - Corpus: `tests/corpus/<rule>/{vulnerable,safe}/*.py`, each file annotated with expected findings
@@ -436,3 +436,14 @@ hackscan/
   mutable aliasing (aliases stored in attributes/containers, returned from helpers,
   `getattr`) as a README limitation, confirm with Codex once, commit with both OKs; any
   further pass-2 aliasing hardening is a separate task.
+- 2026-10-09 (M5 step 3): Benchmark (`benchmarks/`). User choices: Bandit + Semgrep +
+  CodeQL; a new labeled suite plus known-vulnerable apps. Suite: 26 `# vuln:` sinks and 24
+  `# safe:` traps in Flask/Django/FastAPI/CLI code, one labeled sink per function, scored
+  per function (tools report flows at sink, construction or source lines); all tools are
+  normalized through HackScan's SARIF importer. Taxonomy fix found on the way: Semgrep's
+  `tainted-sql-string` rule carries CWE-704 metadata and is now mapped to sqli. Apps:
+  vulpy, PyGoat, DVPWA at pinned commits (MIT), every reported key hand-reviewed in
+  `apps_review.json`; relative recall over the union of true positives. Tests keep
+  RESULTS.json, APPS.json and the README tables in sync with the engine. Results:
+  suite F1 HackScan 82%, CodeQL 85%, Bandit 70%, Semgrep 67%; apps precision/relative
+  recall HackScan 83%/71%, CodeQL 100%/67%, Bandit 50%/76%, Semgrep 92%/52%.

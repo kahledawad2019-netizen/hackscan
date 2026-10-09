@@ -122,6 +122,26 @@ def test_malformed_result_is_skipped_with_warning(tmp_path: Path):
     assert len(result.warnings) == 2
 
 
+@pytest.mark.parametrize(
+    "run",
+    [
+        {"tool": None, "results": []},
+        {"tool": {"driver": None}, "results": []},
+        {"tool": {"driver": {"rules": 5}}, "results": []},
+        {"tool": "x", "originalUriBaseIds": [1], "results": []},
+        {"tool": {}, "results": {"not": "a list"}},
+        {"tool": {}, "results": {}},
+        {"tool": {}, "results": 0},
+        {"tool": {}, "results": None},
+    ],
+)
+def test_malformed_run_metadata_does_not_crash(run: dict):
+    result = import_sarif({"runs": [run]}, PROJECT, SourceIndex(PROJECT))
+    assert result.findings == []
+    malformed = not isinstance(run["results"], list) and run["results"] is not None
+    assert len(result.warnings) == (1 if malformed else 0)
+
+
 def test_gitleaks_rejects_non_array(tmp_path: Path):
     bad = tmp_path / "g.json"
     bad.write_text('{"a": 1}')

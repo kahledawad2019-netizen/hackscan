@@ -1,0 +1,188 @@
+{
+  "generated": "2026-10-09",
+  "vulnerable": 26,
+  "safe": 24,
+  "files": 9,
+  "tools": {
+    "HackScan": {
+      "version": "0.2.0",
+      "skipped": null,
+      "scores": {
+        "sqli": {
+          "tp": 8,
+          "fp": 3,
+          "fn": 0,
+          "trap_hits": 3
+        },
+        "cmdi": {
+          "tp": 6,
+          "fp": 3,
+          "fn": 0,
+          "trap_hits": 3
+        },
+        "codei": {
+          "tp": 6,
+          "fp": 1,
+          "fn": 0,
+          "trap_hits": 1
+        },
+        "weak_crypto": {
+          "tp": 3,
+          "fp": 0,
+          "fn": 3,
+          "trap_hits": 0
+        },
+        "all": {
+          "tp": 23,
+          "fp": 7,
+          "fn": 3,
+          "trap_hits": 7
+        }
+      }
+    },
+    "HackScan (confirmed only)": {
+      "version": "0.2.0",
+      "skipped": null,
+      "scores": {
+        "sqli": {
+          "tp": 7,
+          "fp": 1,
+          "fn": 1,
+          "trap_hits": 1
+        },
+        "cmdi": {
+          "tp": 5,
+          "fp": 1,
+          "fn": 1,
+          "trap_hits": 1
+        },
+        "codei": {
+          "tp": 6,
+          "fp": 0,
+          "fn": 0,
+          "trap_hits": 0
+        },
+        "weak_crypto": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 6,
+          "trap_hits": 0
+        },
+        "all": {
+          "tp": 18,
+          "fp": 2,
+          "fn": 8,
+          "trap_hits": 2
+        }
+      }
+    },
+    "Bandit": {
+      "version": "bandit[sarif]==1.9.4",
+      "skipped": null,
+      "scores": {
+        "sqli": {
+          "tp": 8,
+          "fp": 5,
+          "fn": 0,
+          "trap_hits": 5
+        },
+        "cmdi": {
+          "tp": 6,
+          "fp": 11,
+          "fn": 0,
+          "trap_hits": 8
+        },
+        "codei": {
+          "tp": 5,
+          "fp": 2,
+          "fn": 1,
+          "trap_hits": 2
+        },
+        "weak_crypto": {
+          "tp": 5,
+          "fp": 1,
+          "fn": 1,
+          "trap_hits": 0
+        },
+        "all": {
+          "tp": 24,
+          "fp": 19,
+          "fn": 2,
+          "trap_hits": 15
+        }
+      }
+    },
+    "Semgrep CE": {
+      "version": "semgrep==1.180.0 (p/python sha256:31c1dfa46e8d)",
+      "skipped": null,
+      "scores": {
+        "sqli": {
+          "tp": 4,
+          "fp": 2,
+          "fn": 4,
+          "trap_hits": 2
+        },
+        "cmdi": {
+          "tp": 4,
+          "fp": 3,
+          "fn": 2,
+          "trap_hits": 3
+        },
+        "codei": {
+          "tp": 3,
+          "fp": 1,
+          "fn": 3,
+          "trap_hits": 1
+        },
+        "weak_crypto": {
+          "tp": 5,
+          "fp": 0,
+          "fn": 1,
+          "trap_hits": 0
+        },
+        "all": {
+          "tp": 16,
+          "fp": 6,
+          "fn": 10,
+          "trap_hits": 6
+        }
+      }
+    },
+    "CodeQL": {
+      "version": "CodeQL 2.27.2 (codeql/python-queries@1.8.12, security-extended)",
+      "skipped": null,
+      "scores": {
+        "sqli": {
+          "tp": 8,
+          "fp": 1,
+          "fn": 0,
+          "trap_hits": 1
+        },
+        "cmdi": {
+          "tp": 3,
+          "fp": 0,
+          "fn": 3,
+          "trap_hits": 0
+        },
+        "codei": {
+          "tp": 3,
+          "fp": 0,
+          "fn": 3,
+          "trap_hits": 0
+        },
+        "weak_crypto": {
+          "tp": 6,
+          "fp": 0,
+          "fn": 0,
+          "trap_hits": 0
+        },
+        "all": {
+          "tp": 20,
+          "fp": 1,
+          "fn": 6,
+          "trap_hits": 1
+        }
+      }
+    }
+  }
+}

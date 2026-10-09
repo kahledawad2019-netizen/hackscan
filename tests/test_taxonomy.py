@@ -45,3 +45,8 @@ def test_mergeability():
     assert is_mergeable_class("sqli", ())
     assert is_mergeable_class("other:CWE-79", ("CWE-79",))
     assert not is_mergeable_class("other:semgrep:no-cwe-rule", ())
+
+
+def test_semgrep_tainted_sql_string_is_sqli_despite_its_cwe_metadata():
+    rule = "semgrep:python.flask.security.injection.tainted-sql-string.tainted-sql-string"
+    assert classify(rule, ["CWE-704"]) == "sqli"

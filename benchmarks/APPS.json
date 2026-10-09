@@ -1,0 +1,133 @@
+{
+  "apps": {
+    "vulpy": {
+      "repo": "fportantier/vulpy",
+      "commit": "5249cc8b05a1c37f6b2f757b1cf16a509c327122",
+      "all_vulns": 7,
+      "complete": true,
+      "tools": {
+        "HackScan": {
+          "reports": 7,
+          "tp": 4,
+          "fp": 3,
+          "vulns": 4,
+          "unreviewed": 0
+        },
+        "HackScan (confirmed only)": {
+          "reports": 0,
+          "tp": 0,
+          "fp": 0,
+          "vulns": 0,
+          "unreviewed": 0
+        },
+        "Bandit": {
+          "reports": 11,
+          "tp": 4,
+          "fp": 7,
+          "vulns": 4,
+          "unreviewed": 0
+        },
+        "Semgrep CE": {
+          "reports": 3,
+          "tp": 3,
+          "fp": 0,
+          "vulns": 3,
+          "unreviewed": 0
+        },
+        "CodeQL": {
+          "reports": 3,
+          "tp": 3,
+          "fp": 0,
+          "vulns": 3,
+          "unreviewed": 0
+        }
+      }
+    },
+    "pygoat": {
+      "repo": "adeyosemanputra/pygoat",
+      "commit": "19d17cc8874861142b330636d068bbde54e86b85",
+      "all_vulns": 12,
+      "complete": true,
+      "tools": {
+        "HackScan": {
+          "reports": 9,
+          "tp": 9,
+          "fp": 0,
+          "vulns": 9,
+          "unreviewed": 0
+        },
+        "HackScan (confirmed only)": {
+          "reports": 6,
+          "tp": 6,
+          "fp": 0,
+          "vulns": 6,
+          "unreviewed": 0
+        },
+        "Bandit": {
+          "reports": 19,
+          "tp": 10,
+          "fp": 9,
+          "vulns": 10,
+          "unreviewed": 0
+        },
+        "Semgrep CE": {
+          "reports": 8,
+          "tp": 7,
+          "fp": 1,
+          "vulns": 7,
+          "unreviewed": 0
+        },
+        "CodeQL": {
+          "reports": 11,
+          "tp": 11,
+          "fp": 0,
+          "vulns": 10,
+          "unreviewed": 0
+        }
+      }
+    },
+    "dvpwa": {
+      "repo": "anxolerd/dvpwa",
+      "commit": "a1d8f89fac2e57093189853c6527c2b01fc1d9c1",
+      "all_vulns": 2,
+      "complete": true,
+      "tools": {
+        "HackScan": {
+          "reports": 2,
+          "tp": 2,
+          "fp": 0,
+          "vulns": 2,
+          "unreviewed": 0
+        },
+        "HackScan (confirmed only)": {
+          "reports": 0,
+          "tp": 0,
+          "fp": 0,
+          "vulns": 0,
+          "unreviewed": 0
+        },
+        "Bandit": {
+          "reports": 2,
+          "tp": 2,
+          "fp": 0,
+          "vulns": 2,
+          "unreviewed": 0
+        },
+        "Semgrep CE": {
+          "reports": 1,
+          "tp": 1,
+          "fp": 0,
+          "vulns": 1,
+          "unreviewed": 0
+        },
+        "CodeQL": {
+          "reports": 1,
+          "tp": 1,
+          "fp": 0,
+          "vulns": 1,
+          "unreviewed": 0
+        }
+      }
+    }
+  }
+}

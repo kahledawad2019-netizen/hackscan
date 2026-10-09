@@ -1,0 +1,46 @@
+{
+  "vulpy": {
+    "bad/libuser.py::login::sqli": {"verdict": "tp", "note": "username/password from the login form formatted into SELECT"},
+    "bad/libuser.py::create::sqli": {"verdict": "tp", "note": "form fields %-formatted into INSERT (mod_user.do_create)"},
+    "bad/libuser.py::password_change::sqli": {"verdict": "tp", "note": "new password from the form formatted into UPDATE"},
+    "bad/db.py::db_init::sqli": {"verdict": "fp", "note": "constant seed users"},
+    "bad/db_init.py::db_init_users::sqli": {"verdict": "fp", "note": "constant seed users"},
+    "good/libuser.py::user_create::sqli": {"verdict": "fp", "note": "only called by db_init with constant users"},
+    "bad/vulpy.py::<module>::codei": {"verdict": "fp", "note": "Flask debug=True bound to loopback 127.0.1.1; not a code-injection flow"},
+    "bad/vulpy-ssl.py::<module>::codei": {"verdict": "fp", "note": "Flask debug=True bound to loopback 127.0.1.1"},
+    "good/vulpy.py::<module>::codei": {"verdict": "fp", "note": "Flask debug=True bound to loopback 127.0.1.1"},
+    "good/vulpy-ssl.py::<module>::codei": {"verdict": "fp", "note": "Flask debug=True bound to loopback 127.0.1.1"},
+    "bad/brute.py::<module>::cmdi": {"verdict": "tp", "note": "the program to execute is sys.argv[1] (command-line input treated as untrusted, as in the suite)"},
+    "utils/aes-encrypt.py::aes_encrypt::weak_crypto": {"verdict": "tp", "note": "AES-CFB without authentication; key = single SHA-256 of a passphrase"},
+    "utils/aes-decrypt.py::aes_decrypt::weak_crypto": {"verdict": "tp", "note": "AES-CFB without authentication; key = single SHA-256 of a passphrase"},
+    "utils/skey.py::<module>::weak_crypto": {"verdict": "tp", "note": "SHA-1 hash chain for one-time passwords"}
+  },
+  "pygoat": {
+    "introduction/views.py::sql_lab::sqli": {"verdict": "tp", "note": "POST name/pass concatenated into raw()"},
+    "introduction/views.py::injection_sql_lab::sqli": {"verdict": "tp", "note": "POST name/pass concatenated into raw()"},
+    "introduction/views.py::cmd_lab::cmdi": {"verdict": "tp", "note": "POST domain formatted into a shell=True command"},
+    "introduction/views.py::cmd_lab2::codei": {"verdict": "tp", "note": "eval of POST val"},
+    "introduction/views.py::crypto_failure_lab::weak_crypto": {"verdict": "tp", "note": "MD5 password hash"},
+    "introduction/views.py::auth_failure_lab3::weak_crypto": {"verdict": "tp", "note": "unsalted SHA-256 password hash (fast hash)"},
+    "introduction/views.py::<module>::cmdi": {"verdict": "fp", "note": "import subprocess (Bandit B404)"},
+    "introduction/utility.py::customHash::weak_crypto": {"verdict": "tp", "note": "unsalted SHA-256 password hash (fast hash)"},
+    "introduction/mitre.py::command_out::cmdi": {"verdict": "tp", "vuln": "mitre-17-nmap", "note": "shell=True helper fed with 'nmap ' + POST ip by mitre_lab_17_api"},
+    "introduction/mitre.py::mitre_lab_17_api::cmdi": {"verdict": "tp", "vuln": "mitre-17-nmap", "note": "same flow, reported where the command is built"},
+    "introduction/mitre.py::mitre_lab_25_api::codei": {"verdict": "tp", "note": "eval of POST expression"},
+    "introduction/mitre.py::csrf_lab_login::weak_crypto": {"verdict": "tp", "note": "MD5 password hash"},
+    "introduction/mitre.py::<module>::cmdi": {"verdict": "fp", "note": "import subprocess (Bandit B404)"},
+    "challenge/views.py::DoItFast.post::cmdi": {"verdict": "fp", "note": "argument list without a shell; image name from the challenge table, port is an int"},
+    "challenge/views.py::DoItFast.delete::cmdi": {"verdict": "fp", "note": "argument list without a shell; container id stored by the app"},
+    "challenge/views.py::<module>::cmdi": {"verdict": "fp", "note": "import subprocess (Bandit B404)"},
+    "dockerized_labs/broken_auth_lab/app.py::reset_password::weak_crypto": {"verdict": "tp", "note": "MD5 of email and time as a password-reset token"},
+    "dockerized_labs/broken_auth_lab/app.py::<module>::codei": {"verdict": "tp", "note": "Flask debug=True on 0.0.0.0: the Werkzeug debugger allows remote code execution"},
+    "introduction/lab_code/test.py::<module>::cmdi": {"verdict": "fp", "note": "import subprocess (Bandit B404)"},
+    "uninstaller.py::uninstall_pip_packages::cmdi": {"verdict": "fp", "note": "constant argument lists"},
+    "uninstaller.py::uninstall_pip::cmdi": {"verdict": "fp", "note": "constant argument list"},
+    "uninstaller.py::<module>::cmdi": {"verdict": "fp", "note": "import subprocess (Bandit B404)"}
+  },
+  "dvpwa": {
+    "sqli/dao/student.py::Student.create::sqli": {"verdict": "tp", "note": "student name from the POST form %-formatted into INSERT"},
+    "sqli/dao/user.py::User.check_password::weak_crypto": {"verdict": "tp", "note": "MD5 password hash"}
+  }
+}

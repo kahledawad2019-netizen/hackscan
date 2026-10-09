@@ -49,16 +49,25 @@ def import_sarif(
     for run in data.get("runs", []):
         if not isinstance(run, dict):
             continue
-        driver = run.get("tool", {}).get("driver", {}) or {}
+        # Malformed metadata (`"tool": null`, a list of rules that is not a list...) must
+        # not crash the scan: treat it as absent.
+        tool = _mapping(run.get("tool"))
+        driver = _mapping(tool.get("driver"))
         source = label or KNOWN_DRIVERS.get(str(driver.get("name", "")).lower(), "sarif")
         result.tool = source
         rules = _rules_by_id(driver)
         base_uris = {
             k: v.get("uri")
-            for k, v in (run.get("originalUriBaseIds") or {}).items()
+            for k, v in _mapping(run.get("originalUriBaseIds")).items()
             if isinstance(v, dict)
         }
-        for raw in run.get("results", []) or []:
+        results = run.get("results", [])
+        if results is None:
+            results = []
+        if not isinstance(results, list):
+            result.warnings.append(f"{source}: skipped a run whose `results` is not a list")
+            continue
+        for raw in results:
             try:
                 finding = _convert(raw, source, rules, base_uris, root, index, result.warnings)
             except (AttributeError, KeyError, TypeError, ValueError) as exc:
@@ -69,9 +78,14 @@ def import_sarif(
     return result
 
 
+def _mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 def _rules_by_id(driver: dict[str, Any]) -> dict[str, dict[str, Any]]:
     rules = {}
-    for rule in driver.get("rules", []) or []:
+    listed = driver.get("rules")
+    for rule in listed if isinstance(listed, list) else []:
         if isinstance(rule, dict) and rule.get("id"):
             rules[str(rule["id"])] = rule
     return rules

@@ -15,3 +15,6 @@ htmlcov/
 # Local tool caches/sandbox scratch (never packaged)
 .uv-cache/
 .test-tmp/
+
+# benchmark downloads
+benchmarks/.cache/

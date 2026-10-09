@@ -53,6 +53,8 @@ _RULE_TO_CLASS = {
     "bandit:B105": SECRET,
     "bandit:B106": SECRET,
     "bandit:B107": SECRET,
+    # Semgrep registry rule whose metadata lists CWE-704 although it detects SQLi.
+    "semgrep:python.flask.security.injection.tainted-sql-string.tainted-sql-string": SQLI,
 }
 
 # Own rules use the HS-<CLASS>-NNN scheme.

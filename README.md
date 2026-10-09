@@ -127,6 +127,44 @@ Secrets are never echoed: findings of class `secret` (from any tool) have generi
 messages and redacted snippets, and values reported by Gitleaks are scrubbed from all
 output, including warnings.
 
+## Benchmark
+
+**Labeled suite.** Flask, Django, FastAPI and CLI code with 26 vulnerable sinks and 24
+look-alike safe traps (SQL, command and code injection, weak crypto), scored per function;
+each tool runs the configuration in its Version column (Bandit: all checks; Semgrep CE:
+the `p/python` ruleset; CodeQL: `python-security-extended`; HackScan: no options)
+([methodology and caveats](benchmarks/README.md), [full results](benchmarks/RESULTS.md)):
+
+| Tool | Version | TP | FP | FN | Precision | Recall | F1 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| HackScan | 0.2.0 | 23 | 7 | 3 | 77% | 88% | 82% |
+| HackScan (confirmed only) | 0.2.0 | 18 | 2 | 8 | 90% | 69% | 78% |
+| Bandit | bandit[sarif]==1.9.4 | 24 | 19 | 2 | 56% | 92% | 70% |
+| Semgrep CE | semgrep==1.180.0 (p/python sha256:31c1dfa46e8d) | 16 | 6 | 10 | 73% | 62% | 67% |
+| CodeQL | CodeQL 2.27.2 (codeql/python-queries@1.8.12, security-extended) | 20 | 1 | 6 | 95% | 77% | 85% |
+
+**Known-vulnerable apps.** [vulpy](https://github.com/fportantier/vulpy),
+[PyGoat](https://github.com/adeyosemanputra/pygoat) and
+[DVPWA](https://github.com/anxolerd/dvpwa) at pinned commits; every report reviewed by
+hand. There is no complete ground truth, so recall is relative to the 21 distinct
+vulnerabilities any tool found ([details](benchmarks/APPS.md)):
+
+| Tool | Reports | TP | FP | Vulns found | Precision | Relative recall |
+|---|---:|---:|---:|---:|---:|---:|
+| HackScan | 18 | 15 | 3 | 15 | 83% | 71% |
+| HackScan (confirmed only) | 6 | 6 | 0 | 6 | 100% | 29% |
+| Bandit | 32 | 16 | 16 | 16 | 50% | 76% |
+| Semgrep CE | 12 | 11 | 1 | 11 | 92% | 52% |
+| CodeQL | 15 | 15 | 0 | 14 | 100% | 67% |
+
+CodeQL is the most precise; Bandit finds a little more but about half of its reports are
+noise. HackScan sits in between: higher recall than CodeQL and Semgrep, higher
+precision than Bandit. Its misses are weak ciphers (DES, RC4, ECB, unauthenticated
+modes), which its rule does not cover yet, and flows it does not follow (`self`
+attributes, ambiguous module names). Its false positives are sinks it cannot prove safe (allow-list
+guards, functions only called with constants). The suite is small and written by
+HackScan's authors, so treat both tables as a sanity check rather than a ranking.
+
 ## Rules
 
 | Rule | Detects | Severity |
