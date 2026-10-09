@@ -54,6 +54,7 @@ def redact_messages(messages: Iterable[str], secrets: Iterable[str]) -> list[str
     return [redact_text(m, secrets, literals=False) for m in messages]
 
 
+_LINE_END_RE = re.compile(r"\r\n|\r|\n")  # the line breaks `ast` counts
 SECRET_NAME_RE = re.compile(r"(key|token|secret|passw|pwd|credential|auth)", re.I)
 _ASSIGN_LITERAL_RE = re.compile(
     r"""(?P<name>[A-Za-z_][\w.]*)\s*[:=]\s*(?P<q>['"])(?P<value>(?:\\.|(?!(?P=q)).)*)(?P=q)"""
@@ -104,11 +105,13 @@ def _secret_named(target: ast.AST) -> bool:
     return False
 
 
-def secret_fragments(tree: ast.AST, lines: list[str]) -> set[str]:
-    """Raw source text, line by line, of string literals assigned to secret-looking names
-    (`api_key = (...)`, `password="..."`, `{"token": ...}`), including implicitly joined
-    and triple-quoted strings that line-based patterns cannot see. Pass the result as
-    known secrets so every occurrence in context or diff output is replaced."""
+def mask_secret_literals(source: str, tree: ast.AST) -> str:
+    """`source` with every string literal assigned to a secret-looking name (`api_key =
+    (...)`, `password="..."`, `{"token": ...}`) masked character for character, including
+    implicitly joined and triple-quoted strings that line-based patterns cannot see.
+
+    Lines and character columns are unchanged, so masked source can be shown as context
+    or have fix edits applied to it for a diff."""
     values: list[ast.AST] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and any(_secret_named(t) for t in node.targets):
@@ -126,23 +129,26 @@ def secret_fragments(tree: ast.AST, lines: list[str]) -> set[str]:
                 and isinstance(k.value, str)
                 and SECRET_NAME_RE.search(k.value)
             )
-    fragments: set[str] = set()
+    starts = [0] + [m.end() for m in _LINE_END_RE.finditer(source)]
+
+    def offset(line: int, byte_col: int) -> int:  # AST (line, UTF-8 column) -> str index
+        base = starts[line - 1]
+        nxt = starts[line] if line < len(starts) else len(source)
+        prefix = source[base:nxt].encode("utf-8")[:byte_col]
+        return base + len(prefix.decode("utf-8", errors="ignore"))
+
+    chars = list(source)
     for value in values:
         for lit in ast.walk(value):
-            if not (
-                isinstance(lit, ast.JoinedStr)
-                or isinstance(lit, ast.Constant)
-                and isinstance(lit.value, (str, bytes))
+            if isinstance(lit, ast.JoinedStr) or (
+                isinstance(lit, ast.Constant) and isinstance(lit.value, (str, bytes))
             ):
-                continue
-            for n in range(lit.lineno, min(lit.end_lineno, len(lines)) + 1):
-                raw = lines[n - 1].encode("utf-8")
-                start = lit.col_offset if n == lit.lineno else 0
-                end = lit.end_col_offset if n == lit.end_lineno else len(raw)
-                text = raw[start:end].decode("utf-8", errors="replace").strip()
-                if len(text) >= MIN_SECRET_LENGTH:
-                    fragments.add(text)
-    return fragments
+                start = offset(lit.lineno, lit.col_offset)
+                end = offset(lit.end_lineno, lit.end_col_offset)
+                for i in range(start, end):
+                    if chars[i] not in "\r\n":
+                        chars[i] = "*"
+    return "".join(chars)
 
 
 def redact_findings(findings: list[Finding], secrets: Iterable[str]) -> list[Finding]:

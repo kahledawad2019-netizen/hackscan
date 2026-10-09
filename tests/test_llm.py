@@ -197,6 +197,16 @@ def test_verify_evidence_accepts(tmp_path, body, line, kind):
             "guard",
         ),
         ('    cmd = "ls"\n    from shlex import cmd\n', 4, "constant"),
+        # rebinding later on the same line (Codex verify round)
+        ('    cmd = "ls"; cmd = extra\n', 4, "constant"),
+        ('    if cmd not in {"ls"}: return\n    cmd = extra\n', 4, "guard"),
+        # closure declared before the evidence, called after it
+        (
+            "    def change():\n        nonlocal cmd\n        cmd = extra\n"
+            '    cmd = "ls"\n    change()\n',
+            7,
+            "constant",
+        ),
         # guard that does not restrict the value
         ("    if len(cmd) > 100:\n        return\n", 4, "guard"),
         # guard that does not exit
@@ -309,7 +319,7 @@ def test_context_is_redacted(tmp_path):
     fake = FakeOllama(answer())
     run(tmp_path, code, fake)
     content = fake.requests[0]["messages"][1]["content"]
-    assert "abcd1234efgh5678ijkl9012" not in content and "<REDACTED>" in content
+    assert "abcd1234efgh5678ijkl9012" not in content and "api_token = ****" in content
 
 
 # -- LLM fixes ----------------------------------------------------------------------------
@@ -550,6 +560,8 @@ def test_missing_model_message_is_actionable(monkeypatch):
             ["dict-secret-1"],
         ),
         ('    self.secret = f"pre-{cmd}-post-value"\n', ["pre-", "-post-value"]),
+        ('    api_key = """qz1\nxw2\nvy3\n"""\n', ["qz1", "xw2", "vy3"]),  # short lines
+        ('    os.system(cmd, password="kw-secret-9")\n', ["kw-secret-9"]),  # in the call
     ],
 )
 def test_split_and_triple_quoted_secrets_are_redacted(tmp_path, assignment, pieces):

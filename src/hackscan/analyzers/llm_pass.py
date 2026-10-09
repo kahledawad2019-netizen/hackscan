@@ -35,9 +35,9 @@ from urllib.parse import urlparse
 
 from hackscan.analyzers.remediate import _call_at, _node_region, apply_edits
 from hackscan.core.models import Evidence, Finding, Fix, FixEdit, Status
-from hackscan.core.redact import redact_secretish, secret_fragments
+from hackscan.core.redact import mask_secret_literals, redact_secretish
 from hackscan.importers.common import SourceIndex
-from hackscan.plugins.base import FileContext
+from hackscan.plugins.base import _NEWLINE_RE, FileContext
 
 PRODUCER = "llm"
 PROMPT_VERSION = "3"
@@ -157,19 +157,26 @@ def triage(
         )
         queue = queue[: config.max_findings]
     cache = _Cache(config.cache_dir)
+    masked = None  # (ctx, masked lines) of the current file
     for i in queue:
         finding = findings[i]
         loaded = index.context(finding.location.path)
         if loaded is None:
             continue
         ctx, _ = loaded
-        file_secrets = [*secrets, *secret_fragments(ctx.tree, ctx.lines)]
-        context, first_line = _context(ctx, finding, file_secrets)
+        if masked is None or masked[0] is not ctx:
+            masked = (ctx, _NEWLINE_RE.split(mask_secret_literals(ctx.source, ctx.tree)))
+        lines = masked[1]
+        context, first_line = _context(ctx, finding, secrets, lines)
+        flagged = finding.sink or finding.snippet
+        span = range(finding.location.start_line - 1, finding.location.end_line)
+        if any(lines[n] != ctx.lines[n] for n in span if n < len(lines)):
+            flagged = " ".join(lines[n].strip() for n in span if n < len(lines))
         key = _cache_key(finding, config, context)
         answer = cache.get(key)
         if answer is None:
             try:
-                answer = _ask(finding, context, first_line, config, transport, file_secrets)
+                answer = _ask(finding, context, first_line, config, transport, secrets, flagged)
             except LLMNoAnswer as exc:
                 report.reviewed += 1
                 report.warnings.append(
@@ -195,7 +202,7 @@ def triage(
 # -- prompt -------------------------------------------------------------------------------
 
 
-def _context(ctx: FileContext, finding: Finding, secrets) -> tuple[str, int]:
+def _context(ctx: FileContext, finding: Finding, secrets, lines=None) -> tuple[str, int]:
     """Numbered, redacted source around the finding (its function, capped)."""
     start = max(1, finding.location.start_line - CONTEXT_LINES // 2)
     end = min(len(ctx.lines), finding.location.end_line + CONTEXT_LINES // 2)
@@ -204,18 +211,21 @@ def _context(ctx: FileContext, finding: Finding, secrets) -> tuple[str, int]:
     if func is not None and (func.end_lineno - func.lineno) <= CONTEXT_LINES * 2:
         start, end = func.lineno, func.end_lineno
     lines = [
-        f"{n:>5}| {redact_secretish(ctx.lines[n - 1], secrets)}" for n in range(start, end + 1)
+        f"{n:>5}| {redact_secretish((lines or ctx.lines)[n - 1], secrets)}"
+        for n in range(start, end + 1)
     ]
     return "\n".join(lines), start
 
 
-def _ask(finding, context, first_line, config, transport, secrets=()) -> dict[str, Any] | None:
+def _ask(
+    finding, context, first_line, config, transport, secrets=(), flagged=None
+) -> dict[str, Any] | None:
     fence = f"CODE-{_secrets.token_hex(8)}"
     user = (
         f"Finding: {finding.rule_id} ({finding.vuln_class}), severity {finding.severity.value}\n"
         f"Message: {finding.message}\n"
         f"Flagged call at line {finding.location.start_line}: "
-        f"{redact_secretish(finding.sink or finding.snippet, secrets)}\n"
+        f"{redact_secretish(flagged or finding.sink or finding.snippet, secrets)}\n"
         f"Fence token: {fence}\n"
         f"<<<{fence}\n{context}\n{fence}>>>\n"
     )
@@ -376,7 +386,7 @@ def verify_evidence(ctx: FileContext, finding: Finding, line: int, kind: str) ->
         ok = bool(covered) and sink_names <= covered
     else:
         return False
-    return ok and not _rebound_after(func, covered, stmt.end_lineno)
+    return ok and not _rebound_after(func, covered, stmt)
 
 
 def _sink_value_names(call: ast.Call) -> set[str] | None:
@@ -438,15 +448,23 @@ def _bound_names(node: ast.AST) -> set[str] | None:
     return set()
 
 
-def _rebound_after(func: ast.AST, names: set[str], line: int) -> bool:
+def _rebound_after(func: ast.AST, names: set[str], stmt: ast.stmt) -> bool:
+    """Whether `names` may be rebound or mutated anywhere from `stmt` on (outside it),
+    including later on the same line (`cmd = "ls"; cmd = other`)."""
+    inside = {id(n) for n in ast.walk(stmt)}
+    start = (stmt.lineno, stmt.col_offset)
     for node in ast.walk(func):
-        lineno = getattr(node, "lineno", 0)
-        if lineno <= line:
+        # A closure declared anywhere (even before the cited statement) may be called
+        # after it and rebind the name through `nonlocal`/`global`.
+        if isinstance(node, (ast.Nonlocal, ast.Global)) and names & set(node.names):
+            return True
+        if id(node) in inside:
             continue
+        lineno = getattr(node, "lineno", None)
+        if lineno is not None and (lineno, getattr(node, "col_offset", 0)) < start:
+            continue  # runs before the cited statement
         bound = _bound_names(node)
         if bound is None or names & bound:
-            return True
-        if isinstance(node, (ast.Nonlocal, ast.Global)) and names & set(node.names):
             return True
         if (  # in-place mutation of a container: parts.append(...)
             isinstance(node, ast.Call)
