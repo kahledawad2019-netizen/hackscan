@@ -124,6 +124,19 @@ def _fix_for(f: Finding, index: SourceIndex) -> Fix | None:
     if proposal is None:
         return None
     description, replacement, imports = proposal
+    try:
+        replacement_call = ast.parse(replacement, mode="eval").body
+    except SyntaxError:
+        return None
+    if not ctx.scopes.safe_introduced_names(
+        call, replacement_call, imports=imports, sql_receiver=f.vuln_class == SQLI
+    ):
+        return None
+    if any(
+        not ctx.scopes.safe_module_reference(module, module, call, allow_unbound=True)
+        for module in imports
+    ):
+        return None
     edits = [FixEdit(_node_region(ctx, call), replacement)]
     for module in imports:
         insertion = _import_edit(ctx, module)
@@ -236,8 +249,8 @@ def _operand(expr: ast.AST) -> list[str | ast.AST] | None:
 def _parameterize(parts: list[str | ast.AST], placeholder: str):
     if any(isinstance(p, str) and any(c in p for c in SQL_COMMENTS) for p in parts):
         return None, []  # comments can hide what a position means (`typeof(/* VALUES ( */?)`)
-    if any(isinstance(p, str) and ("\\" in p or "$" in p) for p in parts):
-        return None, []  # escapes and PostgreSQL dollar quotes can change boundaries
+    if any(isinstance(p, str) and any(c in p for c in "\\$`[") for p in parts):
+        return None, []  # escapes and SQL quotes can change boundaries
     joined_parts: list[str | ast.AST] = []
     for part in parts:
         if isinstance(part, str) and joined_parts and isinstance(joined_parts[-1], str):
@@ -475,6 +488,10 @@ def _weak_crypto(call: ast.Call, ctx: FileContext):
     func = call.func
     if isinstance(func, ast.Attribute) and func.attr in {"md5", "sha1"}:
         if "hashlib." + func.attr not in ctx.call_names(call):
+            return None
+        if isinstance(func.value, ast.Name) and not ctx.scopes.safe_module_reference(
+            func.value.id, "hashlib", call
+        ):
             return None
         new_func = ctx.segment(func.value) + ".sha256"
         args = ", ".join(ctx.segment(a) for a in [*call.args, *call.keywords])

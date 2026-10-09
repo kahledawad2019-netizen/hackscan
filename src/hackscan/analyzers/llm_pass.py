@@ -576,6 +576,8 @@ def _llm_fix(finding: Finding, replacement: str, ctx: FileContext, rescan) -> Fi
     call = _call_at(ctx, finding.location)
     if call is None or ctx.has_secret_literal(call):
         return None  # a fix carries the call's real code, secrets included
+    if not ctx.scopes.safe_introduced_names(call, expr, sql_receiver=finding.vuln_class == "sqli"):
+        return None
     before = rescan(ctx.source, ctx.path)
     if any(_strictly_contains(_node_region(ctx, call), f.location) for f in before):
         return None
@@ -792,7 +794,11 @@ def _dotted(expr: ast.AST, ctx: FileContext, original: ast.Call) -> set[str]:
         expr = expr.value
     if isinstance(expr, ast.Name):
         suffix = "".join(f".{part}" for part in reversed(parts))
-        return {f"{name}{suffix}" for name in ctx.scopes.resolve_name(expr.id, original)}
+        return {
+            f"{name}{suffix}"
+            for name in ctx.scopes.resolve_name(expr.id, original)
+            if ctx.scopes.safe_module_reference(expr.id, name, original)
+        }
     return set()
 
 

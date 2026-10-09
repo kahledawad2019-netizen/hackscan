@@ -166,6 +166,21 @@ def f(cur, x):
     assert findings and all(f.fix is None for f in findings)
 
 
+@pytest.mark.parametrize(
+    ("query", "has_fix"),
+    [
+        ('f"SELECT 1 AS `label = {uid}`"', False),
+        ('f"SELECT [label = {uid}]"', False),
+        ('f"SELECT * FROM t WHERE id = {uid}"', True),
+    ],
+)
+def test_sqli_quoted_identifiers_refuse_template_fix(tmp_path: Path, query: str, has_fix: bool):
+    _, findings = fixes_for(
+        tmp_path, f"import sqlite3\ndef f(cur, uid):\n    cur.execute({query})\n"
+    )
+    assert findings and any(f.fix is not None for f in findings) is has_fix
+
+
 def test_sqli_comparison_after_parentheses_in_literal_still_gets_fix(tmp_path: Path):
     _, new = fixed_source(
         tmp_path,
@@ -221,6 +236,64 @@ def test_os_system_becomes_argument_list(tmp_path: Path):
     assert new.startswith("import os\nimport subprocess\n")
     # Same argv the shell would have produced for benign input:
     assert shlex.split("ping -c 1 " + "example.com") == ["ping", "-c", "1", "example.com"]
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        'import os\ndef f(value):\n    subprocess = Wrapper()\n    os.system(f"ls -- {value}")\n',
+        'import os\ndef f(value, subprocess):\n    os.system(f"ls -- {value}")\n',
+        'import os\nsubprocess = object()\ndef f(value):\n    os.system(f"ls -- {value}")\n',
+        'import os\nfrom mylib import subprocess\ndef f(value):\n    os.system(f"ls -- {value}")\n',
+        'import os\nimport subprocess\ndef f(value):\n    subprocess = Wrapper()\n    os.system(f"ls -- {value}")\n',
+        'import os\ndef f(value):\n    def subprocess():\n        pass\n    os.system(f"ls -- {value}")\n',
+        'import os\nfrom mylib import *\ndef f(value):\n    os.system(f"ls -- {value}")\n',
+    ],
+)
+def test_os_system_refuses_shadowed_subprocess(tmp_path: Path, code: str):
+    _, findings = fixes_for(tmp_path, code)
+    assert findings and all(f.fix is None for f in findings)
+
+
+@pytest.mark.parametrize("prefix", ["import os\n", "import os\nimport subprocess\n"])
+def test_os_system_accepts_safe_subprocess_name(tmp_path: Path, prefix: str):
+    source, findings = fixes_for(
+        tmp_path, prefix + 'def f(value):\n    os.system(f"ls -- {value}")\n'
+    )
+    (fix,) = [f.fix for f in findings if f.fix is not None]
+    new = apply_edits(source, fix.edits)
+    assert "subprocess.call(['ls', '--', str(value)])" in new
+    assert new.count("import subprocess\n") == 1
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "str = eval\n",
+        "from mylib import *\n",
+    ],
+)
+def test_os_system_refuses_unsafe_introduced_str(tmp_path: Path, binding: str):
+    _, findings = fixes_for(
+        tmp_path, "import os\n" + binding + 'def f(value):\n    os.system(f"ls -- {value}")\n'
+    )
+    assert findings and all(f.fix is None for f in findings)
+
+
+def test_os_system_refuses_existing_name_called_as_builtin(tmp_path: Path):
+    _, findings = fixes_for(
+        tmp_path,
+        'import os\nstr = eval\ndef f(value):\n    os.system(f"ls -- {value} {str}")\n',
+    )
+    assert findings and all(f.fix is None for f in findings)
+
+
+def test_os_system_refuses_local_shadowed_str(tmp_path: Path):
+    _, findings = fixes_for(
+        tmp_path,
+        'import os\ndef f(value):\n    str = repr\n    os.system(f"ls -- {value}")\n',
+    )
+    assert findings and all(f.fix is None for f in findings)
 
 
 @pytest.mark.parametrize(("conversion", "has_fix"), [("d", False), ("s", True)])
@@ -299,6 +372,28 @@ def test_eval_becomes_literal_eval(tmp_path: Path):
     _, new = fixed_source(tmp_path, '"""Module."""\n\ndef f(s):\n    return eval(s)\n')
     assert new.startswith('"""Module."""\nimport ast\n')
     assert "return ast.literal_eval(s)" in new
+
+
+def test_eval_refuses_star_import(tmp_path: Path):
+    _, findings = fixes_for(tmp_path, "from mylib import *\ndef f(s):\n    return eval(s)\n")
+    assert findings and all(f.fix is None for f in findings)
+
+
+def test_eval_refuses_shadowed_ast(tmp_path: Path):
+    _, findings = fixes_for(tmp_path, "def f(s):\n    ast = object()\n    return eval(s)\n")
+    assert findings and all(f.fix is None for f in findings)
+
+
+def test_eval_refuses_rebound_ast_import(tmp_path: Path):
+    _, findings = fixes_for(tmp_path, "import ast\nast = object()\ndef f(s):\n    return eval(s)\n")
+    assert findings and all(f.fix is None for f in findings)
+
+
+def test_weak_crypto_refuses_rebound_hashlib_import(tmp_path: Path):
+    _, findings = fixes_for(
+        tmp_path, "import hashlib\nhashlib = wrapper\ndef f(data):\n    return hashlib.md5(data)\n"
+    )
+    assert findings and all(f.fix is None for f in findings)
 
 
 def test_nested_eval_only_fixes_inner_call(tmp_path: Path):

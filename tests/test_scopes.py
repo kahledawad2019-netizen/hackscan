@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import textwrap
 
+import pytest
+
 from hackscan.plugins.base import FileContext
 
 
@@ -297,3 +299,76 @@ def test_nonlocal_owner_bound_after_nested_def():
         """
     )
     assert calls(ctx)["system(cmd)"] == "os.system"
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        'str = eval\ndef f(value):\n    os.system(f"ls -- {value}")\n',
+        'def f(value):\n    str = repr\n    os.system(f"ls -- {value}")\n',
+        'from mylib import *\ndef f(value):\n    os.system(f"ls -- {value}")\n',
+        'from .mylib import *\ndef f(value):\n    os.system(f"ls -- {value}")\n',
+        'def f(value):\n    global str\n    os.system(f"ls -- {value}")\n',
+        (
+            "def outer(value):\n    str = repr\n    def f():\n        nonlocal str\n"
+            '        os.system(f"ls -- {value}")\n'
+        ),
+    ],
+)
+def test_introduced_builtin_must_be_unbound_in_every_scope(code: str):
+    ctx = ctx_for(code)
+    call = next(n for n in ast.walk(ctx.tree) if isinstance(n, ast.Call))
+    replacement = ast.parse("subprocess.call(['ls', '--', str(value)])", mode="eval").body
+    assert not ctx.scopes.safe_introduced_names(call, replacement, imports=("subprocess",))
+
+
+def test_introduced_names_accept_only_builtins_and_direct_modules():
+    ctx = ctx_for("import ast as syntax\ndef f(value):\n    return eval(value)\n")
+    call = next(n for n in ast.walk(ctx.tree) if isinstance(n, ast.Call))
+    assert ctx.scopes.safe_introduced_names(
+        call, ast.parse("syntax.literal_eval(value)", mode="eval").body
+    )
+    assert not ctx.scopes.safe_introduced_names(call, ast.parse("unknown(value)", mode="eval").body)
+
+
+def test_existing_value_name_must_be_safe_when_replacement_calls_it():
+    ctx = ctx_for('import os\nstr = eval\ndef f(value):\n    os.system(f"ls -- {value} {str}")\n')
+    call = next(
+        n
+        for n in ast.walk(ctx.tree)
+        if isinstance(n, ast.Call) and ctx.segment(n).startswith("os.system")
+    )
+    replacement = ast.parse("subprocess.call(['ls', '--', str(value), str(str)])", mode="eval").body
+    assert not ctx.scopes.safe_introduced_names(call, replacement, imports=("subprocess",))
+
+
+@pytest.mark.parametrize("module", ["subprocess", "ast", "hashlib", "json"])
+def test_existing_value_name_must_be_safe_as_module_call_target(module: str):
+    ctx = ctx_for(f"{module} = object()\ndef f(value):\n    return eval(({module}, value))\n")
+    call = next(
+        n
+        for n in ast.walk(ctx.tree)
+        if isinstance(n, ast.Call) and ctx.segment(n).startswith("eval")
+    )
+    replacement = ast.parse(f"{module}.call(value)", mode="eval").body
+    assert not ctx.scopes.safe_introduced_names(call, replacement, imports=(module,))
+
+
+def test_sql_receiver_exemption_requires_the_same_expression():
+    ctx = ctx_for(
+        "import sqlite3\ndef f(cur, other, uid):\n"
+        '    cur.execute(f"SELECT * FROM t WHERE id = {uid} AND other = {other}")\n'
+    )
+    call = next(
+        n
+        for n in ast.walk(ctx.tree)
+        if isinstance(n, ast.Call) and ctx.segment(n).startswith("cur.execute")
+    )
+    same = ast.parse(
+        "cur.execute('SELECT * FROM t WHERE id = ? AND other = ?', (uid, other))", mode="eval"
+    ).body
+    changed = ast.parse(
+        "other.execute('SELECT * FROM t WHERE id = ? AND other = ?', (uid, other))", mode="eval"
+    ).body
+    assert ctx.scopes.safe_introduced_names(call, same, sql_receiver=True)
+    assert not ctx.scopes.safe_introduced_names(call, changed, sql_receiver=True)

@@ -466,6 +466,71 @@ def test_valid_llm_fix_is_kept(tmp_path):
     assert f.fix.edits[0].replacement == fixed
 
 
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "",
+        "subprocess = Wrapper()\n",
+        "from mylib import subprocess\n",
+        "from mylib import *\n",
+        "import subprocess\nsubprocess = Wrapper()\n",
+    ],
+)
+def test_llm_rejects_shadowed_replacement_callee(tmp_path, binding):
+    code = "import os\n" + binding + 'def f(value):\n    os.system(f"ls -- {value}")\n'
+    fixed = "subprocess.call(['ls', '--', str(value)])"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert f.fix is None
+
+
+def test_llm_rejects_local_shadow_of_imported_callee(tmp_path):
+    code = (
+        "import os\nimport subprocess\n"
+        'def f(value):\n    subprocess = Wrapper()\n    os.system(f"ls -- {value}")\n'
+    )
+    fixed = "subprocess.call(['ls', '--', str(value)])"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert f.fix is None
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "str = eval\n",
+        "from mylib import *\n",
+    ],
+)
+def test_llm_rejects_unsafe_introduced_str(tmp_path, binding):
+    code = (
+        "import os\nimport subprocess\n"
+        + binding
+        + 'def f(value):\n    os.system(f"ls -- {value}")\n'
+    )
+    fixed = "subprocess.call(['ls', '--', str(value)])"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert f.fix is None
+
+
+def test_llm_rejects_existing_name_called_as_builtin(tmp_path):
+    code = (
+        "import os\nimport subprocess\nstr = eval\n"
+        'def f(value):\n    os.system(f"ls -- {value} {str}")\n'
+    )
+    fixed = "subprocess.call(['ls', '--', str(value), str(str)])"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert f.fix is None
+
+
+def test_llm_rejects_local_shadowed_str(tmp_path):
+    code = (
+        "import os\nimport subprocess\n"
+        'def f(value):\n    str = repr\n    os.system(f"ls -- {value}")\n'
+    )
+    fixed = "subprocess.call(['ls', '--', str(value)])"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert f.fix is None
+
+
 def test_llm_rejects_outer_nested_eval_fix(tmp_path):
     code = "import ast\n\ndef f(x):\n    return eval(eval(x))\n"
     fixed = "ast.literal_eval(eval(x))"
@@ -709,6 +774,32 @@ def get(cur, x):
     fixed = r"""cur.execute("SELECT * FROM t WHERE note = '\\' AND id = %s'", (x,))"""
     (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
     assert f.fix is None
+
+
+@pytest.mark.parametrize(
+    ("query", "fixed", "has_fix"),
+    [
+        (
+            'f"SELECT 1 AS `label = {uid}`"',
+            "cur.execute('SELECT 1 AS `label = ?`', (uid,))",
+            False,
+        ),
+        (
+            'f"SELECT [label = {uid}]"',
+            "cur.execute('SELECT [label = ?]', (uid,))",
+            False,
+        ),
+        (
+            'f"SELECT * FROM t WHERE id = {uid}"',
+            "cur.execute('SELECT * FROM t WHERE id = ?', (uid,))",
+            True,
+        ),
+    ],
+)
+def test_llm_sql_quoted_identifiers_refuse_fix(tmp_path, query, fixed, has_fix):
+    code = f"import sqlite3\ndef get(cur, uid):\n    cur.execute({query})\n"
+    (finding,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert (finding.fix is not None) is has_fix
 
 
 @pytest.mark.parametrize(

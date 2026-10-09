@@ -183,8 +183,8 @@ class PickleLoads(RulePlugin):
   A value starting with `-` can still be read as an option, so review command fixes. No
   fix is offered for a call that contains a secret, or for SQL containing comments.
 - SQL fixes are not offered for unquoted values inside parentheses, double-quoted
-  identifiers, or SQL text containing backslashes or `$`; redaction of values that
-  coincide with identifiers or tool metadata is best-effort.
+  identifiers, or SQL text containing backslashes, `$`, backticks or brackets;
+  redaction of values that coincide with identifiers or tool metadata is best-effort.
 - String and bytes literals assigned to secret-looking names (`api_key`, `password`, `token`, ...)
   are masked in snippets, the LLM context and fix diffs. Their values are also removed
   from imported messages and evidence before output or LLM triage when the value is

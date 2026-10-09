@@ -20,6 +20,7 @@ for sink resolution (and, from M2, taint tracking).
 from __future__ import annotations
 
 import ast
+import builtins
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
@@ -29,6 +30,14 @@ _NESTED_SCOPES = (*FUNCTION_TYPES, ast.ClassDef, *COMPREHENSION_TYPES)
 
 IMPORT = "import"
 LOCAL = "local"
+FIX_MODULES = frozenset({"subprocess", "ast", "json", "hashlib"})
+BUILTIN_NAMES = frozenset(vars(builtins)) - {
+    "__name__",
+    "__doc__",
+    "__package__",
+    "__loader__",
+    "__spec__",
+}
 
 
 @dataclass(eq=False)
@@ -99,6 +108,111 @@ class ScopeIndex:
                 return self._resolve_in(scope, name, star)
             scope = scope.parent
         return frozenset({name, *(f"{m}.{name}" for m in star)})
+
+    def safe_module_reference(
+        self, name: str, module: str, node: ast.AST, *, allow_unbound: bool = False
+    ) -> bool:
+        """Whether `name` can only denote a direct import of `module` at `node`.
+
+        Templates may add an import for an unbound name. LLM rewrites must use an
+        existing import. A star import or any non-import binding makes either unsafe.
+        """
+        scope: Scope | None = self.scope_of(node)
+        first = True
+        while scope is not None:
+            if isinstance(scope.node, ast.ClassDef) and not first:
+                scope = scope.parent
+                continue
+            first = False
+            if scope.star_imports:
+                return False
+            if name in scope.globals_ and scope is not self.module:
+                scope = self.module
+                continue
+            if name in scope.nonlocals:
+                scope = scope.parent
+                while scope is not None and not scope.is_function:
+                    scope = scope.parent
+                continue
+            if name in scope.bindings:
+                return scope.bindings[name] == {(IMPORT, module)}
+            scope = scope.parent
+        return allow_unbound
+
+    def safe_builtin_reference(self, name: str, node: ast.AST) -> bool:
+        """Whether `name` must resolve to a builtin at this call site."""
+        if name not in BUILTIN_NAMES:
+            return False
+        scope: Scope | None = self.scope_of(node)
+        first = True
+        while scope is not None:
+            if isinstance(scope.node, ast.ClassDef) and not first:
+                scope = scope.parent
+                continue
+            first = False
+            if (
+                scope.star_imports
+                or name in scope.bindings
+                or name in scope.globals_
+                or name in scope.nonlocals
+            ):
+                return False
+            scope = scope.parent
+        return True
+
+    def safe_introduced_names(
+        self,
+        original: ast.Call,
+        replacement: ast.AST,
+        *,
+        imports: tuple[str, ...] = (),
+        sql_receiver: bool = False,
+    ) -> bool:
+        """Check new load names and every call target in a proposed replacement.
+
+        Template fixes may add the declared imports. LLM fixes pass no imports,
+        so their module names must already have a direct import at the call site.
+        """
+        original_names = {
+            n.id
+            for n in ast.walk(original)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+        }
+        replacement_names = {
+            n.id
+            for n in ast.walk(replacement)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+        }
+        for name in replacement_names - original_names:
+            if not self._safe_fix_name(name, original, imports):
+                return False
+        for node in ast.walk(replacement):
+            if not isinstance(node, ast.Call):
+                continue
+            # SQL fixes keep the original receiver; it can be a local cursor.
+            if (
+                sql_receiver
+                and node is replacement
+                and isinstance(original.func, ast.Attribute)
+                and ast.dump(node.func) == ast.dump(original.func)
+            ):
+                continue
+            func = node.func
+            while isinstance(func, (ast.Attribute, ast.Subscript)):
+                func = func.value
+            if isinstance(func, ast.Name) and not self._safe_fix_name(func.id, original, imports):
+                return False
+        return True
+
+    def _safe_fix_name(self, name: str, original: ast.Call, imports: tuple[str, ...]) -> bool:
+        if self.safe_builtin_reference(name, original):
+            return True
+        return any(
+            self.safe_module_reference(
+                name, module, original, allow_unbound=name == module and module in imports
+            )
+            for module in FIX_MODULES
+        )
 
     def _resolve_in(self, scope: Scope, name: str, star: list[str]) -> frozenset[str]:
         kinds = scope.bindings.get(name)
@@ -193,7 +307,9 @@ class ScopeIndex:
                         self._bind_import(scope, a.asname or a.name, f"{node.module}.{a.name}")
             else:  # relative import: project-local module, unknown to us
                 for a in node.names:
-                    if a.name != "*":
+                    if a.name == "*":
+                        scope.star_imports.append("." * node.level + (node.module or ""))
+                    else:
                         self._bind_store(scope, a.asname or a.name)
         elif isinstance(node, ast.NamedExpr):
             target_scope = scope

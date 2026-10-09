@@ -11,3 +11,7 @@ htmlcov/
 *.sarif
 !tests/fixtures/**/*.sarif
 .hackscan-cache/
+
+# Local tool caches/sandbox scratch (never packaged)
+.uv-cache/
+.test-tmp/
