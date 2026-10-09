@@ -42,6 +42,7 @@ class ScanResult:
     llm_reviewed: int = 0
     # Values to redact from any raw text shown later (e.g. fix diffs). Never exported.
     secrets: frozenset[str] = field(default=frozenset(), repr=False)
+    file_secrets: dict[str, set[str]] = field(default_factory=dict, repr=False)
 
 
 def scan(target: Path, config: HackScanConfig) -> ScanResult:
@@ -55,10 +56,12 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
     findings: list[Finding] = []
     errors: list[str] = []
     known_secrets: set[str] = set()
+    file_secrets: dict[str, set[str]] = {}
     for result in results:
         findings.extend(result.findings)
         errors.extend(result.errors)
         known_secrets.update(result.secrets)
+        file_secrets.setdefault(result.path, set()).update(result.file_secrets)
 
     index = SourceIndex(root)
     external = collect(
@@ -75,10 +78,21 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
     )
 
     known_secrets.update(index.secret_values)
-    known_secrets.update(external.secrets)
-    final = assign_ids(redact_findings(merge_findings(findings), known_secrets))
+    for path, values in index.file_secret_values.items():
+        file_secrets.setdefault(path, set()).update(values)
+    tool_secrets = external.secrets
+    all_secrets = known_secrets | tool_secrets
+    diagnostic_secrets = known_secrets | set().union(*file_secrets.values())
+    final = assign_ids(
+        redact_findings(
+            merge_findings(findings),
+            known_secrets,
+            tool_secrets=tool_secrets,
+            file_secrets=file_secrets,
+        )
+    )
     if config.fixes:
-        final = drop_secret_fixes(generate_fixes(final, index), known_secrets)
+        final = drop_secret_fixes(generate_fixes(final, index), all_secrets, file_secrets)
     warnings = list(external.warnings)
     llm_reviewed = 0
     if config.llm:
@@ -93,13 +107,19 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
                 allow_suppress=config.llm_suppress,
                 cache_dir=default_cache_dir(),
             ),
-            secrets=known_secrets,
+            secrets=all_secrets,
+            file_secrets=file_secrets,
             rescan=lambda source, path: (
                 analyze_source(source, path, plugins, taint=config.taint).findings
             ),
         )
         # Model text is untrusted too: redact again before anything is printed.
-        final = redact_findings(drop_secret_fixes(report.findings, known_secrets), known_secrets)
+        final = redact_findings(
+            drop_secret_fixes(report.findings, all_secrets, file_secrets),
+            known_secrets,
+            tool_secrets=tool_secrets,
+            file_secrets=file_secrets,
+        )
         warnings.extend(report.warnings)
         llm_reviewed = report.reviewed
     return ScanResult(
@@ -107,10 +127,13 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
         findings=final,
         files_scanned=len(files),
         duration_seconds=time.perf_counter() - started,
-        errors=redact_messages([*sorted(errors), *external.errors], known_secrets),
-        warnings=redact_messages(warnings, known_secrets),
+        errors=redact_messages(
+            [*sorted(errors), *external.errors], diagnostic_secrets, tool_secrets=tool_secrets
+        ),
+        warnings=redact_messages(warnings, diagnostic_secrets, tool_secrets=tool_secrets),
         llm_reviewed=llm_reviewed,
-        secrets=frozenset(known_secrets),
+        secrets=frozenset(all_secrets),
+        file_secrets=file_secrets,
         tool_runs=external.runs,
     )
 

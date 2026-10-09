@@ -76,6 +76,32 @@ def test_gitleaks_redacts_secret():
     assert secret not in json.dumps(f.to_dict())
 
 
+def test_gitleaks_secret_in_rule_id_is_redacted_in_all_outputs(tmp_path: Path):
+    from hackscan.cli import _text
+    from hackscan.plugins.loader import builtin_plugins
+    from hackscan.sarif.generator import export_sarif
+
+    (tmp_path / "m.py").write_text('api_token = "abc"\n', encoding="utf-8")
+    report = tmp_path / "leaks.json"
+    report.write_text(
+        json.dumps([{"File": "m.py", "StartLine": 1, "Secret": "abc", "RuleID": "abc"}]),
+        encoding="utf-8",
+    )
+    config = HackScanConfig(imports=(("gitleaks", report),))
+    result = scan(tmp_path, config)
+    (finding,) = result.findings
+    assert finding.rule_id == "gitleaks:<REDACTED>"
+    assert all("abc" not in evidence.message for evidence in finding.evidence)
+    outputs = (
+        _text(result, result.findings, config, quiet=True),
+        json.dumps([finding.to_dict()]),
+        json.dumps(export_sarif(result, builtin_plugins())),
+    )
+    assert all("abc" not in output for output in outputs)
+    sarif = export_sarif(result, builtin_plugins())
+    assert sarif["runs"][0]["tool"]["driver"]["rules"][0]["id"] == finding.rule_id
+
+
 @pytest.mark.parametrize(
     "content",
     ["not json", '{"no": "runs"}', "[1, 2]"],
@@ -347,6 +373,23 @@ def test_known_secret_redacted_from_warnings(tmp_path):
     assert secret not in " ".join(result.warnings + result.errors)
 
 
+def test_short_gitleaks_secret_is_redacted_from_outside_root_warning(tmp_path):
+    report = tmp_path / "g.json"
+    report.write_text(
+        json.dumps([{"File": "../abc/outside.py", "StartLine": 1, "Secret": "abc"}]),
+        encoding="utf-8",
+    )
+    (tmp_path / "abc.py").write_text("def broken(:\n", encoding="utf-8")
+    (tmp_path / "vuln.py").write_text(
+        'import os\ndef run(cmd):\n    os.system("abc" + cmd)\n', encoding="utf-8"
+    )
+    result = scan(tmp_path, HackScanConfig(imports=(("gitleaks", report),)))
+    assert result.warnings and result.errors and result.findings
+    assert "abc" not in json.dumps(
+        result.warnings + result.errors + [f.to_dict() for f in result.findings]
+    )
+
+
 def test_tool_error_exit_code_is_partial(monkeypatch, tmp_path):
     import subprocess
 
@@ -487,6 +530,179 @@ def test_source_secret_in_tool_message_is_redacted_before_llm(tmp_path, monkeypa
     dumped += json.dumps(export_sarif(result, builtin_plugins()))
     assert requests
     assert secret not in dumped + json.dumps(requests)
+
+
+def test_escaped_secret_source_spelling_is_redacted_from_outputs_and_llm(
+    tmp_path: Path, monkeypatch
+):
+    from hackscan.analyzers.llm_pass import LLMConfig, triage
+    from hackscan.cli import _text
+    from hackscan.core import pipeline
+    from hackscan.plugins.loader import builtin_plugins
+    from hackscan.sarif.generator import export_sarif
+
+    raw = r"\x68unter2"
+    (tmp_path / "m.py").write_text(
+        f'import os\n\ndef run(cmd):\n    api_token = "{raw}"\n    os.system(cmd)\n',
+        encoding="utf-8",
+    )
+    report = tmp_path / "r.sarif"
+    report.write_text(
+        json.dumps(
+            {
+                "runs": [
+                    {
+                        "tool": {"driver": {"name": "Bandit"}},
+                        "results": [
+                            {
+                                "ruleId": "B605",
+                                "message": {"text": f'Observed api_token = "{raw}"; value {raw}'},
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": "m.py"},
+                                            "region": {"startLine": 5},
+                                        }
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    requests = []
+
+    def fake_transport(url, payload, timeout):
+        requests.append(payload)
+        return {
+            "message": {
+                "content": json.dumps(
+                    {
+                        "verdict": "uncertain",
+                        "reason": "unclear",
+                        "evidence_line": None,
+                        "evidence_kind": None,
+                        "fixed_call": None,
+                    }
+                )
+            }
+        }
+
+    monkeypatch.setattr(
+        pipeline,
+        "triage",
+        lambda findings, index, config, **kwargs: triage(
+            findings,
+            index,
+            LLMConfig(cache_dir=None),
+            transport=fake_transport,
+            **kwargs,
+        ),
+    )
+    config = HackScanConfig(imports=(("bandit", report),), llm=True)
+    result = scan(tmp_path, config)
+    assert requests
+    escaped = json.dumps(raw)[1:-1]
+    outputs = (
+        _text(result, result.findings, config, quiet=True),
+        json.dumps([f.to_dict() for f in result.findings]),
+        json.dumps(export_sarif(result, builtin_plugins())),
+        json.dumps(requests),
+    )
+    assert raw not in outputs[0]
+    assert all(escaped not in output for output in outputs[1:])
+
+
+@pytest.mark.parametrize(
+    ("assignment", "secret"),
+    [
+        ("api_token = 123456789012", "123456789012"),
+        ("pin_secret = -987654321", "987654321"),
+        ('password = "abc" + "def"', "abcdef"),
+    ],
+)
+def test_source_secret_values_do_not_leak_to_outputs_or_llm(
+    tmp_path: Path, monkeypatch, assignment: str, secret: str
+):
+    from hackscan.analyzers.llm_pass import LLMConfig, triage
+    from hackscan.cli import _text
+    from hackscan.core import pipeline
+    from hackscan.plugins.loader import builtin_plugins
+    from hackscan.sarif.generator import export_sarif
+
+    (tmp_path / "m.py").write_text(
+        f"import os\n\ndef run(cmd):\n    {assignment}\n    os.system(cmd)\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "r.sarif"
+    report.write_text(
+        json.dumps(
+            {
+                "runs": [
+                    {
+                        "tool": {"driver": {"name": "Bandit"}},
+                        "results": [
+                            {
+                                "ruleId": "B605",
+                                "message": {"text": f"Observed secret value {secret}"},
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": "m.py"},
+                                            "region": {"startLine": 5},
+                                        }
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    requests = []
+
+    def fake_ollama(url, payload, timeout):
+        requests.append(payload)
+        return {
+            "message": {
+                "content": json.dumps(
+                    {
+                        "verdict": "uncertain",
+                        "reason": "unclear",
+                        "evidence_line": None,
+                        "evidence_kind": None,
+                        "fixed_call": None,
+                    }
+                )
+            }
+        }
+
+    monkeypatch.setattr(
+        pipeline,
+        "triage",
+        lambda findings, index, config, **kwargs: triage(
+            findings,
+            index,
+            LLMConfig(cache_dir=None),
+            transport=fake_ollama,
+            **kwargs,
+        ),
+    )
+    config = HackScanConfig(imports=(("bandit", report),), llm=True)
+    result = scan(tmp_path, config)
+    assert requests
+    outputs = (
+        _text(result, result.findings, config, quiet=True),
+        json.dumps([f.to_dict() for f in result.findings]),
+        json.dumps(export_sarif(result, builtin_plugins())),
+        json.dumps(requests),
+    )
+    assert all(secret not in output for output in outputs)
 
 
 def test_secret_literal_values_cover_joined_multiline_and_fstring_parts():

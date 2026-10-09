@@ -342,3 +342,19 @@ hackscan/
   have no snippet unless their Python source parses, preventing multi-line secret leaks.
   Equal-length secrets are redacted in lexical order, and only secret-like source values
   join report-wide known secrets; local source masking still covers every secret-named literal.
+- 2026-10-09 (gate review follow-up): LLM predicate guard evidence is limited to
+  `isdigit()` and `isdecimal()`; constant allow-lists retain their existing rule.
+  Secret-named function and lambda defaults are masked, and AST rule messages and evidence
+  use the file's masked literal spans. Gitleaks values are redacted at any nonzero length
+  across findings, warnings and errors. Diff redaction preserves assignment spacing.
+  Every masked source literal of at least four characters is also redacted within findings,
+  fixes and LLM requests for its own file. LLM rewrites now require exact code and hash
+  arguments and literal subprocess keyword values to prevent hidden execution. Release-gate
+  fixes restrict shell template keywords, redact secret-bearing rule IDs and escaped source
+  spellings, and refuse SQL placeholders inside partial quoted literals. Sole dynamic
+  parenthesized SQL lists get no placeholder; file-scoped secrets also redact rule metadata
+  before triage and diagnostics across the report. Release-gate follow-up refuses unquoted
+  dynamic SQL values inside any parentheses and SQL text containing backslashes, while
+  redacting finding function names before IDs, output and triage. Double-quoted SQL
+  identifiers and SQL text containing `$` also receive no fix. Numeric and concatenated
+  secret literals are masked and collected.

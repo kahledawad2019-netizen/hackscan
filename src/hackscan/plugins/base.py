@@ -65,11 +65,15 @@ class FileContext:
     lines: list[str] = field(init=False)
     scopes: ScopeIndex = field(init=False)
     _masked: list[str] | None = field(init=False, default=None, repr=False)
+    _masked_replacements: tuple[tuple[str, str], ...] | None = field(
+        init=False, default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         self.lines = _NEWLINE_RE.split(self.source)
         self.scopes = ScopeIndex(self.tree)
         self._masked = None
+        self._masked_replacements = None
 
     # -- names -------------------------------------------------------------------------
 
@@ -165,6 +169,23 @@ class FileContext:
 
     def masked_segment(self, node: ast.AST) -> str:
         return self._slice(self.masked_lines, node)
+
+    def redact_masked_spans(self, text: str) -> str:
+        """Replace complete masked AST literal spans in rule text, once per file."""
+        if self._masked_replacements is None:
+            from hackscan.core.redact import secret_literal_spans
+
+            replacements = set()
+            for start, end in secret_literal_spans(self.source, self.tree):
+                raw = self.source[start:end]
+                masked = "".join("*" if char not in "\r\n" else char for char in raw)
+                replacements.add((raw, masked))
+            self._masked_replacements = tuple(
+                sorted(replacements, key=lambda pair: (-len(pair[0]), pair[0], pair[1]))
+            )
+        for raw, masked in self._masked_replacements:
+            text = text.replace(raw, masked)
+        return text
 
     def has_secret_literal(self, node: ast.AST) -> bool:
         """Whether `node`'s source contains a masked secret literal: then no fix is made,

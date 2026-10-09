@@ -353,7 +353,8 @@ def _diff(result: ScanResult, finding: Finding) -> str:
         )
     )
     # Diff context shows raw source: redact anything secret-looking before printing.
-    return "\n".join(redact_secretish(line, result.secrets) for line in diff.splitlines())
+    secrets = result.secrets | result.file_secrets.get(finding.location.path, set())
+    return "\n".join(redact_secretish(line, secrets) for line in diff.splitlines())
 
 
 def _json(result: ScanResult, findings: list[Finding]) -> dict:

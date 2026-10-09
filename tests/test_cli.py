@@ -77,6 +77,36 @@ def test_sarif_output_file(tmp_path: Path):
     assert any(r.get("suppressions") for r in log["runs"][0]["results"])
 
 
+@pytest.mark.parametrize("fmt", ["text", "json", "sarif"])
+@pytest.mark.parametrize(
+    "source,secret",
+    [
+        (
+            'import os\nhandler = lambda cmd, token="lambda-secret-222": os.system(cmd)\n',
+            "lambda-secret-222",
+        ),
+        (
+            "import os\ndef f(cmd, password=(\n"
+            '    "multiline-secret-222"\n)):\n    os.system(cmd)\n',
+            "multiline-secret-222",
+        ),
+        (
+            'import os\ndef f(cmd):\n    os.system(api_token := "correcthorsebat" + cmd)\n',
+            "correcthorsebat",
+        ),
+    ],
+)
+def test_secret_defaults_and_rule_messages_do_not_leak_in_output(
+    tmp_path: Path, fmt: str, source: str, secret: str
+):
+    path = tmp_path / "secret.py"
+    path.write_text(source, encoding="utf-8")
+    result = run("scan", str(path), "--format", fmt)
+    assert result.exit_code == 0, result.output
+    assert "HS-CMDI-001" in result.output
+    assert secret not in result.output
+
+
 def test_ignore_glob(tmp_path: Path):
     (tmp_path / "keep.py").write_text("eval(input())\n")
     (tmp_path / "legacy").mkdir()

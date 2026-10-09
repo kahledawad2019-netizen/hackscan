@@ -97,8 +97,10 @@ its surrounding function to a local Ollama model and asks for a verdict:
   kept only if the patched file parses and a re-scan shows the finding gone and nothing new.
 - **false positive**: only accepted if the model cites a line that HackScan verifies runs
   on every path and makes the value safe: an allow-list guard (`if x not in {...}: return`,
-  `if not x.isdigit(): raise`), a constant, or a class-appropriate
-  sanitizer. Otherwise the reasoning is attached as a note and the finding stays open.
+  `if not x.isdigit(): raise`, or `if not x.isdecimal(): raise`), a constant, or a
+  class-appropriate sanitizer. `isnumeric()`, `isalnum()`, `isalpha()`, and
+  `isidentifier()` do not qualify. Otherwise the reasoning is attached as a note and
+  the finding stays open.
 - Code is fenced with a random per-request token and treated as untrusted data; replies
   must match a JSON schema; secret-looking values are redacted; answers are cached.
 
@@ -180,6 +182,9 @@ class PickleLoads(RulePlugin):
   not offered when a value directly follows a flag; put `--` before operands to get one.
   A value starting with `-` can still be read as an option, so review command fixes. No
   fix is offered for a call that contains a secret, or for SQL containing comments.
+- SQL fixes are not offered for unquoted values inside parentheses, double-quoted
+  identifiers, or SQL text containing backslashes or `$`; redaction of values that
+  coincide with identifiers or tool metadata is best-effort.
 - String and bytes literals assigned to secret-looking names (`api_key`, `password`, `token`, ...)
   are masked in snippets, the LLM context and fix diffs. Their values are also removed
   from imported messages and evidence before output or LLM triage when the value is

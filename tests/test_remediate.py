@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ast
 import shlex
 import sqlite3
 import textwrap
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -82,6 +84,109 @@ def test_sqli_psycopg_uses_format_placeholders(tmp_path: Path):
 
 
 @pytest.mark.parametrize(
+    ("query", "literal"),
+    [
+        ("f\"SELECT id FROM t WHERE note LIKE 'abc%' AND id = {x}\"", "abc%"),
+        ("\"SELECT id FROM t WHERE note = '100%%' AND id = %s\" % x", "100%"),
+    ],
+)
+@pytest.mark.parametrize(("module", "placeholder"), [("psycopg2", "%s"), ("sqlite3", "?")])
+def test_sqli_literal_percent_uses_driver_escape(
+    tmp_path: Path, query, literal, module, placeholder
+):
+    _, new = fixed_source(tmp_path, f"import {module}\ndef f(cur, x):\n    cur.execute({query})\n")
+    execute = next(
+        node
+        for node in ast.walk(ast.parse(new))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "execute"
+    )
+    sql = execute.args[0].value
+    escaped_literal = literal.replace("%", "%%") if placeholder == "%s" else literal
+    assert (
+        sql
+        == f"SELECT id FROM t WHERE note {'LIKE' if literal == 'abc%' else '='} '{escaped_literal}' AND id = {placeholder}"
+    )
+    if placeholder == "%s":
+        assert sql % ("'v'",) == (
+            f"SELECT id FROM t WHERE note {'LIKE' if literal == 'abc%' else '='} '{literal}' AND id = 'v'"
+        )
+        with pytest.raises(ValueError, match="unsupported format character"):
+            sql.replace("%%", "%") % ("'v'",)
+
+
+def test_sqli_percent_decimal_has_no_template_fix(tmp_path: Path):
+    _, findings = fixes_for(
+        tmp_path,
+        'import sqlite3\ndef f(cur, x):\n    cur.execute("SELECT id FROM t WHERE id = %d" % x)\n',
+    )
+    assert findings and all(f.fix is None for f in findings)
+
+
+def test_sqli_percent_decimal_changes_sqlite_result_when_bound():
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE t (id INTEGER)")
+    db.execute("INSERT INTO t VALUES (1)")
+    x = 1.9
+    assert db.execute("SELECT id FROM t WHERE id = %d" % x).fetchall() == [(1,)]  # noqa: UP031
+    assert db.execute("SELECT id FROM t WHERE id = ?", (x,)).fetchall() == []
+    db.close()
+
+
+@pytest.mark.parametrize("spacing", ["", "  "])
+def test_sqli_refuses_sole_dynamic_parenthesized_list(tmp_path: Path, spacing: str):
+    _, findings = fixes_for(
+        tmp_path,
+        "import sqlite3\ndef f(cur, x):\n"
+        f'    cur.execute("INSERT INTO t(a,b) VALUES ({spacing}" + x + "{spacing})")\n',
+    )
+    assert findings and all(f.fix is None for f in findings)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        '"INSERT INTO t VALUES (" + x + ", 1)"',
+        'f"INSERT INTO t VALUES (1, {x})"',
+        'f"SELECT * FROM t WHERE (a = {x})"',
+    ],
+)
+def test_sqli_refuses_unquoted_values_inside_parentheses(tmp_path: Path, query: str):
+    _, findings = fixes_for(tmp_path, f"import sqlite3\ndef f(cur, x):\n    cur.execute({query})\n")
+    assert findings and all(f.fix is None for f in findings)
+
+
+def test_sqli_refuses_mysql_backslash_escaped_quote(tmp_path: Path):
+    code = r"""import pymysql
+def f(cur, x):
+    cur.execute("SELECT * FROM t WHERE note = '\\' AND id = " + x + "'")
+"""
+    _, findings = fixes_for(tmp_path, code)
+    assert findings and all(f.fix is None for f in findings)
+
+
+def test_sqli_comparison_after_parentheses_in_literal_still_gets_fix(tmp_path: Path):
+    _, new = fixed_source(
+        tmp_path,
+        "import sqlite3\ndef f(cur, x):\n"
+        "    cur.execute(f\"SELECT * FROM t WHERE note = '(' AND id = {x}\")\n",
+    )
+    assert "WHERE note = '" in new
+    assert "' AND id = ?" in new
+    assert ", (x,))" in new
+
+
+def test_sqli_refuses_separate_unquoted_values(tmp_path: Path):
+    _, findings = fixes_for(
+        tmp_path,
+        "import sqlite3\ndef f(cur, x, y):\n"
+        '    cur.execute("INSERT INTO t(a,b) VALUES (" + x + ", " + y + ")")\n',
+    )
+    assert findings and all(f.fix is None for f in findings)
+
+
+@pytest.mark.parametrize(
     "code",
     [
         # identifier positions cannot be parameters
@@ -118,12 +223,58 @@ def test_os_system_becomes_argument_list(tmp_path: Path):
     assert shlex.split("ping -c 1 " + "example.com") == ["ping", "-c", "1", "example.com"]
 
 
+@pytest.mark.parametrize(("conversion", "has_fix"), [("d", False), ("s", True)])
+def test_os_system_percent_conversion_fix(tmp_path: Path, conversion: str, has_fix: bool):
+    source, findings = fixes_for(
+        tmp_path,
+        f'import os\n\ndef f(n):\n    os.system("ls %{conversion}" % n)\n',
+    )
+    assert findings
+    fixes = [f.fix for f in findings if f.fix is not None]
+    assert bool(fixes) is has_fix
+    if has_fix:
+        assert "subprocess.call(['ls', str(n)])" in apply_edits(source, fixes[0].edits)
+
+
 def test_shell_true_drops_shell(tmp_path: Path):
     _, new = fixed_source(
         tmp_path,
         'import subprocess\n\ndef f(name):\n    subprocess.run(f"cat {name}", shell=True, check=True)\n',
     )
     assert "subprocess.run(['cat', str(name)], check=True)" in new  # f-string calls str()
+
+
+@pytest.mark.parametrize(
+    ("extra", "safe"),
+    [
+        ('executable="/bin/sh"', False),
+        ('env={"PATH": "/tmp"}', False),
+        ("timeout=seconds()", False),
+        ("check=True, timeout=5, stdout=subprocess.PIPE", True),
+        ("check=enabled", True),
+    ],
+)
+def test_shell_template_only_preserves_safe_keywords(tmp_path: Path, extra: str, safe: bool):
+    code = (
+        "import subprocess\n\ndef f(path):\n"
+        f'    subprocess.run(f"cat {{path}}", shell=True, {extra})\n'
+    )
+    source, findings = fixes_for(tmp_path, code)
+    assert findings
+    fixes = [f.fix for f in findings if f.fix is not None]
+    if safe:
+        assert len(fixes) == 1
+        assert f"subprocess.run(['cat', str(path)], {extra})" in apply_edits(source, fixes[0].edits)
+    else:
+        assert not fixes
+
+
+def test_shell_template_rejects_extra_positional_args(tmp_path: Path):
+    _, findings = fixes_for(
+        tmp_path,
+        'import subprocess\n\ndef f(path):\n    subprocess.run(f"cat {path}", None, shell=True)\n',
+    )
+    assert findings and all(f.fix is None for f in findings)
 
 
 @pytest.mark.parametrize(
@@ -148,6 +299,45 @@ def test_eval_becomes_literal_eval(tmp_path: Path):
     _, new = fixed_source(tmp_path, '"""Module."""\n\ndef f(s):\n    return eval(s)\n')
     assert new.startswith('"""Module."""\nimport ast\n')
     assert "return ast.literal_eval(s)" in new
+
+
+def test_nested_eval_only_fixes_inner_call(tmp_path: Path):
+    _, findings = fixes_for(tmp_path, "def f(x):\n    return eval(eval(x))\n")
+    by_sink = {f.sink: f for f in findings}
+    assert by_sink["eval(eval(x))"].fix is None
+    inner = by_sink["eval(x)"].fix
+    assert inner is not None
+    assert any(edit.replacement == "ast.literal_eval(x)" for edit in inner.edits)
+
+
+def test_command_containing_eval_gets_no_fix(tmp_path: Path):
+    _, findings = fixes_for(tmp_path, 'import os\n\ndef f(x):\n    os.system("ls " + eval(x))\n')
+    by_sink = {f.sink: f for f in findings}
+    assert by_sink['os.system("ls " + eval(x))'].fix is None
+
+
+def test_nested_builtin_sink_blocks_fix_even_when_omitted_from_findings(tmp_path: Path):
+    source = "def f(x):\n    return eval(eval(x))\n"
+    (tmp_path / "m.py").write_text(source, encoding="utf-8")
+    findings = analyze_source(source, "m.py", builtin_plugins()).findings
+    outer = next(f for f in findings if f.sink == "eval(eval(x))")
+    (result,) = generate_fixes([outer], SourceIndex(tmp_path))
+    assert result.fix is None
+
+
+def test_suppressed_nested_finding_from_any_rule_blocks_fix(tmp_path: Path):
+    source = "def f(x):\n    return eval(str(x))\n"
+    (tmp_path / "m.py").write_text(source, encoding="utf-8")
+    (outer,) = analyze_source(source, "m.py", builtin_plugins()).findings
+    inner = replace(
+        outer,
+        rule_id="external:rule",
+        location=Region("m.py", 2, 17, 2, 23),
+        status=Status.SUPPRESSED,
+        suppression="test",
+    )
+    result = generate_fixes([outer, inner], SourceIndex(tmp_path))
+    assert result[0].fix is None
 
 
 def test_eval_with_namespaces_and_exec_get_no_fix(tmp_path: Path):
@@ -329,15 +519,93 @@ def test_typeof_changes_meaning_when_bound():
 @pytest.mark.parametrize(
     ("query", "expected"),
     [
-        ('f"INSERT INTO t VALUES ({a}, {b})"', "'INSERT INTO t VALUES (?, ?)', (a, b)"),
-        ("f\"INSERT INTO t VALUES ('x,y', {b})\"", "\"INSERT INTO t VALUES ('x,y', ?)\", (b,)"),
+        ("f\"INSERT INTO t VALUES ('{a}', '{b}')\"", "'INSERT INTO t VALUES (?, ?)', (a, b)"),
+        ("f\"INSERT INTO t VALUES ('x,y', '{b}')\"", "\"INSERT INTO t VALUES ('x,y', ?)\", (b,)"),
+        (
+            "f\"SELECT * FROM t WHERE a IN ('{a}', '{b}')\"",
+            "'SELECT * FROM t WHERE a IN (?, ?)', (a, b)",
+        ),
         ('f"SELECT * FROM t LIMIT {a}, {b}"', "'SELECT * FROM t LIMIT ?, ?', (a, b)"),
     ],
 )
-def test_values_lists_and_limit_still_parameterized(tmp_path: Path, query, expected):
+def test_quoted_lists_and_limit_still_parameterized(tmp_path: Path, query, expected):
     code = f"import sqlite3\ndef f(cur, a, b):\n    cur.execute({query})\n"
     _, new = fixed_source(tmp_path, code)
     assert expected in new
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("f\"SELECT x FROM t WHERE note = 'a={v}'\"", None),
+        ("f\"SELECT x FROM t WHERE note = '{v}'\"", "WHERE note = ?', (v,)"),
+        ("f\"SELECT x FROM t WHERE a = 'x' AND b = {v}\"", "WHERE a = 'x' AND b = ?\", (v,)"),
+    ],
+)
+def test_sql_template_respects_quoted_literal_boundaries(tmp_path: Path, query, expected):
+    source, findings = fixes_for(
+        tmp_path, f"import sqlite3\ndef f(cur, v):\n    cur.execute({query})\n"
+    )
+    assert findings
+    fixes = [f.fix for f in findings if f.fix is not None]
+    if expected is None:
+        assert not fixes
+    else:
+        assert len(fixes) == 1
+        assert expected in apply_edits(source, fixes[0].edits)
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("f\"SELECT 1 WHERE 'foo''' = '{x}'''\"", None),
+        ("f\"SELECT 1 WHERE a = '{x}'''\"", None),
+        ('"SELECT 1 WHERE a = \'" + x + "\'" + "\'\'"', None),
+        ("f\"SELECT 1 WHERE a = '''{x}'\"", None),
+        ("f\"SELECT 1 WHERE a = '{x}'\"", "SELECT 1 WHERE a = ?"),
+        ("f\"SELECT 1 WHERE a = '{x}' AND b = 'y'\"", "SELECT 1 WHERE a = ? AND b = 'y'"),
+    ],
+)
+def test_sql_template_only_binds_entire_single_quoted_literal(tmp_path: Path, query, expected):
+    source, findings = fixes_for(
+        tmp_path, f"import sqlite3\ndef f(cur, x):\n    cur.execute({query})\n"
+    )
+    assert findings
+    fixes = [f.fix for f in findings if f.fix is not None]
+    if expected is None:
+        assert not fixes
+    else:
+        assert len(fixes) == 1
+        assert expected in apply_edits(source, fixes[0].edits)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "f'SELECT * FROM t WHERE a = \"{v}\"'",
+        "f'SELECT * FROM t WHERE a = \"pre{v}\"'",
+        "f'''SELECT * FROM t WHERE note = 'a\"b' AND a = \"{v}\"'''",
+        'f"SELECT $q$id={v}$q$"',
+        'f"SELECT $$id={v}$$"',
+        'f"SELECT * FROM t WHERE note = $q$literal$q$ AND a = {v}"',
+    ],
+)
+def test_sql_template_refuses_identifiers_and_dollar_text(tmp_path: Path, query: str):
+    _, findings = fixes_for(tmp_path, f"import sqlite3\ndef f(cur, v):\n    cur.execute({query})\n")
+    assert findings and all(f.fix is None for f in findings)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "f\"SELECT * FROM t WHERE a = '{v}'\"",
+        'f"SELECT * FROM t WHERE a = {v}"',
+        'f"""SELECT * FROM t WHERE note = "a\'b" AND a = \'{v}\'"""',
+    ],
+)
+def test_sql_template_keeps_value_positions(tmp_path: Path, query: str):
+    _, new = fixed_source(tmp_path, f"import sqlite3\ndef f(cur, v):\n    cur.execute({query})\n")
+    assert "a = ?" in new and "(v,)" in new
 
 
 # -- Codex verify round 2: argv must not hand the value to code or an option -----------

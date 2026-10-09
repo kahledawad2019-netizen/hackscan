@@ -22,6 +22,7 @@ from hackscan.core.models import Finding, Fix, FixEdit, Region, Status
 from hackscan.core.taxonomy import CMDI, CODEI, SQLI, WEAK_CRYPTO
 from hackscan.importers.common import SourceIndex
 from hackscan.plugins.base import FileContext, first_arg, keyword
+from hackscan.plugins.loader import builtin_plugins
 
 PRODUCER = "template"
 
@@ -38,29 +39,73 @@ FORMAT_MODULES = (
     # asyncpg uses $1-style placeholders: deliberately no template
 )
 # A placeholder is only valid where SQL expects a *value* and binding keeps its meaning:
-# after a comparison, in a VALUES list, after LIMIT/OFFSET. Not inside function calls
+# after a comparison, in a quoted VALUES/IN element, or after LIMIT/OFFSET.
+# Not inside function calls
 # (`typeof(?)` sees text where the inlined value was a number) nor after a bare comma
 # (`SELECT a, ?` selects a constant, not a column).
 _VALUE_POSITION_RE = re.compile(
     r"(=|<|>|<=|>=|<>|!=|\blike|\blimit|\boffset|\blimit\s+[^\s,()]+\s*,"
-    r"|\bvalues\s*\((?:[^()'\"]|'[^']*'|\"[^\"]*\")*)\s*$",
+    r"|\b(?:values|in)\s*\((?:[^()'\"]|'[^']*'|\"[^\"]*\")*)\s*$",
     re.I,
 )
-# `IN (` expects a list: `IN ({ids})` with ids="1,2" means two values, `IN (?)` one.
-_IN_LIST_RE = re.compile(r"\bin\s*\([^)]*$", re.I)
 SQL_COMMENTS = ("--", "/*", "#")  # `#` starts a comment in MySQL
 SHELL_META = set("|&;<>$`*?(){}[]~!#\\'\"\n")
+
+# Keywords that cannot change which program runs or how its arguments are interpreted.
+SAFE_SUBPROCESS_KEYWORDS = {
+    "check", "capture_output", "text", "timeout", "stdout", "stderr", "encoding", "errors",
+    "universal_newlines",
+}  # fmt: skip
 
 
 def generate_fixes(findings: list[Finding], index: SourceIndex) -> list[Finding]:
     out = []
+    plugins = builtin_plugins()
     for f in findings:
-        if f.fix is None and f.status is not Status.SUPPRESSED:
+        if f.status is Status.SUPPRESSED:
+            out.append(f)
+            continue
+        loaded = index.context(f.location.path)
+        call = _call_at(loaded[0], f.location) if loaded is not None else None
+        if call is not None and (
+            any(
+                _strictly_contains(f.location, other.location)
+                for other in findings
+                if other is not f
+            )
+            or _has_nested_builtin_sink(call, loaded[0], plugins)
+        ):
+            f = replace(f, fix=None)
+        elif f.fix is None:
             fix = _fix_for(f, index)
             if fix is not None:
                 f = replace(f, fix=fix)
         out.append(f)
     return out
+
+
+def _strictly_contains(outer: Region, inner: Region) -> bool:
+    return (
+        outer.path == inner.path
+        and outer.start_pos <= inner.start_pos
+        and inner.end_pos <= outer.end_pos
+        and (outer.start_pos < inner.start_pos or inner.end_pos < outer.end_pos)
+    )
+
+
+def _has_nested_builtin_sink(call: ast.Call, ctx: FileContext, plugins) -> bool:
+    outer = _node_region(ctx, call)
+    for node in ast.walk(call):
+        if (
+            node is call
+            or not isinstance(node, ast.Call)
+            or not _strictly_contains(outer, _node_region(ctx, node))
+        ):
+            continue
+        for plugin in plugins:
+            if type(node) in plugin.node_types and any(plugin.check(node, ctx)):
+                return True
+    return False
 
 
 def _fix_for(f: Finding, index: SourceIndex) -> Fix | None:
@@ -160,9 +205,9 @@ def _sql_parts(expr: ast.AST) -> list[str | ast.AST] | None:
         if not (isinstance(expr.left, ast.Constant) and isinstance(expr.left.value, str)):
             return None
         values = expr.right.elts if isinstance(expr.right, ast.Tuple) else [expr.right]
-        pieces = re.split(r"(%[sd])", expr.left.value)
+        pieces = re.split(r"(%s)", expr.left.value)
         if "%" in "".join(pieces[::2]).replace("%%", ""):
-            return None  # other conversions or literal % we cannot map safely
+            return None  # conversions other than %s cannot keep their value unchanged
         if len(pieces[1::2]) != len(values):
             return None
         out: list[str | ast.AST] = []
@@ -191,31 +236,107 @@ def _operand(expr: ast.AST) -> list[str | ast.AST] | None:
 def _parameterize(parts: list[str | ast.AST], placeholder: str):
     if any(isinstance(p, str) and any(c in p for c in SQL_COMMENTS) for p in parts):
         return None, []  # comments can hide what a position means (`typeof(/* VALUES ( */?)`)
+    if any(isinstance(p, str) and ("\\" in p or "$" in p) for p in parts):
+        return None, []  # escapes and PostgreSQL dollar quotes can change boundaries
+    joined_parts: list[str | ast.AST] = []
+    for part in parts:
+        if isinstance(part, str) and joined_parts and isinstance(joined_parts[-1], str):
+            joined_parts[-1] += part
+        else:
+            joined_parts.append(part)
     sql = ""
     params: list[ast.AST] = []
+    placeholder_positions: list[int] = []
     pending_quote = None
-    for part in parts:
+    for part in joined_parts:
         if isinstance(part, str):
             if pending_quote is not None:
-                if not part.startswith(pending_quote):
+                # Without the value, these quotes must close an empty literal, not
+                # become the first half of a doubled-quote escape.
+                if (
+                    not part.startswith("'")
+                    or _sql_quote_start(pending_quote + part[:2]) is not None
+                ):
                     return None, []  # value was only part of a quoted string
                 part = part[1:]
                 pending_quote = None
             sql += part
             continue
-        quote = sql[-1] if sql.endswith(("'", '"')) else None
+        quote_start = _sql_quote_start(sql)
+        if quote_start is not None:
+            if sql[quote_start] != "'" or quote_start != len(sql) - 1:
+                return None, []  # identifiers and partial strings cannot be bound
+            quote = "'"
+        else:
+            quote = None
         if quote:
             if sql[-2:-1] == "%":
                 return None, []  # LIKE '%...' wildcard concatenation
+            quote_prefix = sql
             sql = sql[:-1]
-        if _IN_LIST_RE.search(sql.rstrip()) or not _VALUE_POSITION_RE.search(sql.rstrip()):
+        if quote is None and _sql_has_unclosed_parenthesis(sql):
+            return None, []  # a value may supply multiple elements or SQL syntax
+        if not _VALUE_POSITION_RE.search(sql.rstrip()):
             return None, []  # identifier or keyword position: placeholders not allowed
+        placeholder_positions.append(len(sql))
         sql += placeholder
         params.append(part)
-        pending_quote = quote
+        pending_quote = quote_prefix if quote else None
     if pending_quote is not None:
         return None, []
+    if placeholder == "%s":
+        # Format-style drivers parse every percent sign once parameters are supplied.
+        # Escape literal SQL spans, leaving the placeholders themselves untouched.
+        spans = []
+        start = 0
+        for position in placeholder_positions:
+            spans.extend((sql[start:position].replace("%", "%%"), placeholder))
+            start = position + len(placeholder)
+        spans.append(sql[start:].replace("%", "%%"))
+        sql = "".join(spans)
     return sql, params
+
+
+def _sql_quote_start(sql: str) -> int | None:
+    """Index of an open SQL quote, accounting for doubled quote escapes."""
+    quote = None
+    start = None
+    i = 0
+    while i < len(sql):
+        char = sql[i]
+        if quote is None:
+            if char in ("'", '"'):
+                quote, start = char, i
+        elif char == quote:
+            if i + 1 < len(sql) and sql[i + 1] == quote:
+                i += 1
+            else:
+                quote, start = None, None
+        i += 1
+    return start
+
+
+def _sql_has_unclosed_parenthesis(sql: str) -> bool:
+    """Whether SQL text ends inside parentheses, ignoring quoted literal content."""
+    depth = 0
+    quote = None
+    i = 0
+    while i < len(sql):
+        char = sql[i]
+        if quote is None:
+            if char in ("'", '"'):
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth = max(0, depth - 1)
+        elif char == quote:
+            if i + 1 < len(sql) and sql[i + 1] == quote:
+                i += 1
+            else:
+                quote = None
+        i += 1
+    return depth > 0
 
 
 # -- command injection -------------------------------------------------------------------
@@ -240,10 +361,15 @@ def _cmdi(call: ast.Call, ctx: FileContext):
         )
     target = sorted(n for n in names if n.startswith("subprocess."))
     shell = keyword(call, "shell")
-    if target and isinstance(shell, ast.Constant) and shell.value is True and call.args:
-        rest = [ctx.segment(a) for a in call.args[1:]]
+    if target and isinstance(shell, ast.Constant) and shell.value is True and len(call.args) == 1:
+        if any(
+            k.arg not in SAFE_SUBPROCESS_KEYWORDS or not _safe_keyword_value(k.value)
+            for k in call.keywords
+            if k.arg != "shell"
+        ):
+            return None
         kwargs = [ctx.segment(k) for k in call.keywords if k.arg != "shell"]
-        args = ", ".join([argv_src, *rest, *kwargs])
+        args = ", ".join([argv_src, *kwargs])
         return (
             "Pass an argument list and drop shell=True, so input cannot add commands. "
             "Review: a value starting with '-' can still be read as an option.",
@@ -251,6 +377,16 @@ def _cmdi(call: ast.Call, ctx: FileContext):
             (),
         )
     return None
+
+
+def _safe_keyword_value(value: ast.AST) -> bool:
+    if isinstance(value, (ast.Constant, ast.Name)):
+        return True
+    if isinstance(value, ast.Attribute):
+        while isinstance(value, ast.Attribute):
+            value = value.value
+        return isinstance(value, ast.Name)
+    return False
 
 
 def _argv(expr: ast.AST, ctx: FileContext) -> list[str] | None:

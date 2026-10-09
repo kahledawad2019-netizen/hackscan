@@ -13,7 +13,7 @@ from pathlib import Path
 from hackscan.analyzers.suppressions import apply_inline_suppressions
 from hackscan.analyzers.taint_pass import apply_taint
 from hackscan.core.models import OWN_SOURCE, Evidence, Finding, Region
-from hackscan.core.redact import secret_literal_values
+from hackscan.core.redact import file_secret_literal_values, secret_literal_values
 from hackscan.core.taxonomy import classify
 from hackscan.plugins.base import FileContext, Match, RulePlugin
 
@@ -26,6 +26,7 @@ class FileResult:
     findings: list[Finding] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     secrets: set[str] = field(default_factory=set)
+    file_secrets: set[str] = field(default_factory=set)
 
 
 def analyze_source(
@@ -42,7 +43,8 @@ def analyze_source(
         result.errors.append(f"{rel_path}: cannot parse: {exc}")
         return result
 
-    result.secrets = secret_literal_values(tree)
+    result.secrets = secret_literal_values(tree, source)
+    result.file_secrets = file_secret_literal_values(tree, source)
     ctx = FileContext(path=rel_path, source=source, tree=tree)
     by_type: dict[type[ast.AST], list[RulePlugin]] = {}
     for plugin in plugins:
@@ -113,20 +115,21 @@ def _to_finding(
     )
     func = ctx.enclosing_function(node)
     sink = ctx.masked_segment(node)  # secrets never enter a finding
+    message = ctx.redact_masked_spans(match.message)
     return Finding(
         id="",
         vuln_class=classify(plugin.rule_id, plugin.cwe),
         rule_id=plugin.rule_id,
         severity=plugin.severity,
         location=region,
-        message=match.message,
+        message=message,
         snippet=_line_snippet(ctx, start_line, end_line),
         sink=sink,
         function=qualnames.get(id(func)) if func is not None else None,
         cwe=plugin.cwe,
         sources=(OWN_SOURCE,),
         confidence=match.confidence if match.confidence is not None else plugin.default_confidence,
-        evidence=(Evidence(PRODUCER, "rule_match", f"{plugin.name}: {match.message}"),),
+        evidence=(Evidence(PRODUCER, "rule_match", f"{plugin.name}: {message}"),),
     )
 
 

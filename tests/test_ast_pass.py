@@ -39,6 +39,42 @@ def test_finding_fields_from_ast():
     assert f.evidence[0].producer == "ast"
 
 
+@pytest.mark.parametrize(
+    "literal",
+    ['"*x*"', r'"\"x\""'],
+)
+def test_secret_literal_does_not_change_unrelated_rule_words(literal):
+    source = f'password = {literal}\nimport os\ndef run(cmd):\n    os.system("ls " + cmd)\n'
+    (finding,) = scan(source).findings
+    assert "executed" in finding.message
+    assert "executed" in finding.evidence[0].message
+    assert "e*ecuted" not in finding.message
+
+
+def test_escaped_secret_quoted_in_rule_message_is_masked():
+    raw = r'"\"x\""'
+    source = f"import os\ndef run(cmd):\n    os.system(api_token := {raw} + cmd)\n"
+    (finding,) = scan(source).findings
+    assert raw not in finding.message
+    assert "*" * len(raw) in finding.message
+    assert "executed" in finding.message
+    assert finding.message in finding.evidence[0].message
+
+
+def test_multiline_secret_quoted_in_rule_message_is_masked_as_one_span():
+    source = (
+        "import os\ndef run(cmd):\n"
+        '    os.system(api_token := """*x*\nquoted \\"value\\"\nlast""" + cmd)\n'
+    )
+    (finding,) = scan(source).findings
+    raw = '"""*x*\nquoted \\"value\\"\nlast"""'
+    masked = "".join("*" if char != "\n" else char for char in raw)
+    assert raw not in finding.message
+    assert masked in finding.message
+    assert "executed" in finding.message
+    assert finding.message in finding.evidence[0].message
+
+
 def test_columns_are_characters_not_bytes():
     result = scan('x = "é€"; eval(x + y)\n')
     (f,) = result.findings

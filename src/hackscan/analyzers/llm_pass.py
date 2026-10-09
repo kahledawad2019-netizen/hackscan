@@ -27,13 +27,19 @@ import re
 import secrets as _secrets
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from hackscan.analyzers.remediate import _call_at, _node_region, apply_edits
+from hackscan.analyzers.remediate import (
+    SAFE_SUBPROCESS_KEYWORDS,
+    _call_at,
+    _node_region,
+    _strictly_contains,
+    apply_edits,
+)
 from hackscan.core.models import Evidence, Finding, Fix, FixEdit, Status
 from hackscan.core.redact import redact_secretish
 from hackscan.importers.common import SourceIndex
@@ -143,6 +149,7 @@ def triage(
     secrets: set[str] | frozenset[str] = frozenset(),
     transport: Transport = http_transport,
     rescan: Callable[[str, str], list[Finding]] | None = None,
+    file_secrets: Mapping[str, set[str]] | None = None,
 ) -> LLMReport:
     report = LLMReport(findings=list(findings))
     if urlparse(config.host).hostname not in {"localhost", "127.0.0.1", "::1"}:
@@ -163,8 +170,9 @@ def triage(
         if loaded is None:
             continue
         ctx, _ = loaded
+        scoped_secrets = secrets | (file_secrets or {}).get(finding.location.path, set())
         lines = ctx.masked_lines
-        context, first_line = _context(ctx, finding, secrets, lines)
+        context, first_line = _context(ctx, finding, scoped_secrets, lines)
         flagged = finding.sink or finding.snippet
         span = range(finding.location.start_line - 1, finding.location.end_line)
         if any(lines[n] != ctx.lines[n] for n in span if n < len(lines)):
@@ -173,7 +181,9 @@ def triage(
         answer = cache.get(key)
         if answer is None:
             try:
-                answer = _ask(finding, context, first_line, config, transport, secrets, flagged)
+                answer = _ask(
+                    finding, context, first_line, config, transport, scoped_secrets, flagged
+                )
             except LLMNoAnswer as exc:
                 report.reviewed += 1
                 report.warnings.append(
@@ -220,7 +230,7 @@ def _ask(
     fence = f"CODE-{_secrets.token_hex(8)}"
     user = (
         f"Finding: {finding.rule_id} ({finding.vuln_class}), severity {finding.severity.value}\n"
-        f"Message: {finding.message}\n"
+        f"Message: {redact_secretish(finding.message, secrets)}\n"
         f"Flagged call at line {finding.location.start_line}: "
         f"{redact_secretish(flagged or finding.sink or finding.snippet, secrets)}\n"
         f"Fence token: {fence}\n"
@@ -492,7 +502,7 @@ def _is_class_sanitizer(expr: ast.AST, ctx: FileContext, vuln_class: str) -> boo
     )
 
 
-_SAFE_PREDICATES = {"isdigit", "isdecimal", "isnumeric", "isalnum", "isalpha", "isidentifier"}
+_SAFE_PREDICATES = {"isdigit", "isdecimal"}
 
 
 def _allow_list_guard(stmt: ast.stmt, vuln_class: str) -> set[str]:
@@ -526,7 +536,7 @@ def _allow_list_guard(stmt: ast.stmt, vuln_class: str) -> set[str]:
         )
     ):
         return {test.left.id}
-    # `x.isdigit()` and friends: no shell, SQL or code metacharacters can pass
+    # Decimal digits cannot name a program or global, or add SQL syntax.
     if (
         isinstance(test, ast.Call)
         and not test.args
@@ -566,6 +576,9 @@ def _llm_fix(finding: Finding, replacement: str, ctx: FileContext, rescan) -> Fi
     call = _call_at(ctx, finding.location)
     if call is None or ctx.has_secret_literal(call):
         return None  # a fix carries the call's real code, secrets included
+    before = rescan(ctx.source, ctx.path)
+    if any(_strictly_contains(_node_region(ctx, call), f.location) for f in before):
+        return None
     if not _plausible_rewrite(finding.vuln_class, call, expr, ctx):
         return None
     fix = Fix(
@@ -578,7 +591,6 @@ def _llm_fix(finding: Finding, replacement: str, ctx: FileContext, rescan) -> Fi
         ast.parse(patched)
     except (SyntaxError, ValueError):
         return None
-    before = rescan(ctx.source, ctx.path)
     after = rescan(patched, ctx.path)
     open_before = {
         (f.rule_id, f.location.start_line) for f in before if f.status is not Status.SUPPRESSED
@@ -662,17 +674,43 @@ def _plausible_rewrite(vuln_class: str, original: ast.Call, new: ast.Call, ctx) 
     allowed = SAFE_REWRITES.get(vuln_class)
     if not allowed:
         return False
-    names = {n for n in _dotted(func)}
-    if not names & allowed:
+    names = _dotted(func, ctx, original)
+    if not names or not names <= allowed:
         return False
-    return vuln_class != "cmdi" or _same_program(original, new, ctx)
+    if vuln_class == "codei":
+        return (
+            len(original.args) == len(new.args) == 1
+            and not original.keywords
+            and not new.keywords
+            and ast.dump(original.args[0]) == ast.dump(new.args[0])
+        )
+    if vuln_class == "weak_crypto":
+        return _same_crypto_args(original, new)
+    return _same_program(original, new, ctx)
 
 
-# Keywords that cannot change which program runs or what it receives as arguments.
-SAFE_SUBPROCESS_KEYWORDS = {
-    "check", "capture_output", "text", "timeout", "stdout", "stderr", "encoding", "errors",
-    "universal_newlines",
-}  # fmt: skip
+def _same_crypto_args(original: ast.Call, new: ast.Call) -> bool:
+    if len(original.args) != len(new.args) or any(
+        ast.dump(a) != ast.dump(b) for a, b in zip(original.args, new.args, strict=True)
+    ):
+        return False
+    keywords = new.keywords
+    if len(keywords) == len(original.keywords) + 1:
+        if any(k.arg == "usedforsecurity" for k in original.keywords):
+            return False
+        added = [
+            k
+            for k in keywords
+            if k.arg == "usedforsecurity"
+            and isinstance(k.value, ast.Constant)
+            and k.value.value is False
+        ]
+        if len(added) != 1:
+            return False
+        keywords = [k for k in keywords if k is not added[0]]
+    return len(keywords) == len(original.keywords) and all(
+        ast.dump(a) == ast.dump(b) for a, b in zip(original.keywords, keywords, strict=True)
+    )
 
 
 def _same_value(a: ast.AST, b: ast.AST) -> bool:
@@ -703,6 +741,12 @@ def _same_program(original: ast.Call, new: ast.Call, ctx: FileContext) -> bool:
     if not isinstance(new.args[0], (ast.List, ast.Tuple)):
         return False
     if any(k.arg not in SAFE_SUBPROCESS_KEYWORDS for k in new.keywords):
+        return False
+    if any(
+        not isinstance(k.value, ast.Constant)
+        or type(k.value.value) not in {bool, int, float, str, type(None)}
+        for k in new.keywords
+    ):
         return False
     expected = _argv(original.args[0], ctx)
     if not expected:
@@ -741,14 +785,14 @@ def _same_sql(original: ast.Call, new: ast.Call, ctx: FileContext) -> bool:
     )
 
 
-def _dotted(expr: ast.AST) -> set[str]:
+def _dotted(expr: ast.AST, ctx: FileContext, original: ast.Call) -> set[str]:
     parts = []
     while isinstance(expr, ast.Attribute):
         parts.append(expr.attr)
         expr = expr.value
     if isinstance(expr, ast.Name):
-        parts.append(expr.id)
-        return {".".join(reversed(parts))}
+        suffix = "".join(f".{part}" for part in reversed(parts))
+        return {f"{name}{suffix}" for name in ctx.scopes.resolve_name(expr.id, original)}
     return set()
 
 

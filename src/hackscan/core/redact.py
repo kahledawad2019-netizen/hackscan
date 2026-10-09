@@ -17,7 +17,7 @@ from __future__ import annotations
 import ast
 import math
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import replace
 
 from hackscan.core.models import Finding
@@ -31,28 +31,33 @@ _LITERAL_RE = re.compile(r"""(?P<q>['"])(?:\\.|(?!(?P=q)).)+(?P=q)""")
 _ASSIGNED_RE = re.compile(r"(?P<key>[=:]\s*)(?P<value>[^\s#'\"][^#]*?)(?P<tail>\s*(?:#.*)?)$")
 
 
-def redact_text(text: str, secrets: Iterable[str], literals: bool) -> str:
-    for secret in sorted(set(secrets), key=lambda s: (-len(s), s)):
-        if len(secret) >= MIN_SECRET_LENGTH:
-            text = text.replace(secret, REDACTED)
+def redact_text(
+    text: str, secrets: Iterable[str], literals: bool, *, tool_secrets: Iterable[str] = ()
+) -> str:
+    known = {s for s in secrets if len(s) >= MIN_SECRET_LENGTH}
+    known.update(s for s in tool_secrets if s)
+    for secret in sorted(known, key=lambda s: (-len(s), s)):
+        text = text.replace(secret, REDACTED)
     if literals:
         text = _LITERAL_RE.sub(lambda m: f"{m.group('q')}{REDACTED}{m.group('q')}", text)
     return text
 
 
-def redact_code(text: str, secrets: Iterable[str]) -> str:
+def redact_code(text: str, secrets: Iterable[str], *, tool_secrets: Iterable[str] = ()) -> str:
     """Secret-class snippet/sink: literals and assigned values removed, line by line."""
     lines = []
-    for line in redact_text(text, secrets, literals=True).split("\n"):
+    for line in redact_text(text, secrets, literals=True, tool_secrets=tool_secrets).split("\n"):
         lines.append(
             _ASSIGNED_RE.sub(lambda m: f"{m.group('key')}{REDACTED}{m.group('tail')}", line)
         )
     return "\n".join(lines)
 
 
-def redact_messages(messages: Iterable[str], secrets: Iterable[str]) -> list[str]:
+def redact_messages(
+    messages: Iterable[str], secrets: Iterable[str], *, tool_secrets: Iterable[str] = ()
+) -> list[str]:
     secrets = list(secrets)
-    return [redact_text(m, secrets, literals=False) for m in messages]
+    return [redact_text(m, secrets, literals=False, tool_secrets=tool_secrets) for m in messages]
 
 
 _LINE_END_RE = re.compile(r"\r\n|\r|\n")  # the line breaks `ast` counts
@@ -60,7 +65,7 @@ SECRET_NAME_RE = re.compile(
     r"(key|token|secret|passw|pwd|credential|auth(?!or(?:s|ity)?(?:$|[_\W])))", re.I
 )
 _ASSIGN_LITERAL_RE = re.compile(
-    r"""(?P<name>[A-Za-z_][\w.]*)\s*[:=]\s*(?P<q>['"])(?P<value>(?:\\.|(?!(?P=q)).)*)(?P=q)"""
+    r"""(?P<name>[A-Za-z_][\w.]*)(?P<between>\s*[:=]\s*)(?P<q>['"])(?P<value>(?:\\.|(?!(?P=q)).)*)(?P=q)"""
 )
 _LONG_LITERAL_RE = re.compile(r"""(['"])([A-Za-z0-9+/=_\-]{20,})\1""")
 # C0/C1 control characters except tab and newline: never let scanned code, tool output or
@@ -80,11 +85,11 @@ def _entropy(text: str) -> float:
 def redact_secretish(text: str, secrets: Iterable[str] = ()) -> str:
     """Known secrets, literals assigned to secret-looking names, and long high-entropy
     literals, for text that leaves the scanner in raw form (LLM context, diffs)."""
-    text = redact_text(text, secrets, literals=False)
+    text = redact_text(text, (), literals=False, tool_secrets=secrets)
 
     def assigned(m: re.Match) -> str:
         if SECRET_NAME_RE.search(m.group("name")):
-            return f"{m.group('name')} = {m.group('q')}{REDACTED}{m.group('q')}"
+            return f"{m.group('name')}{m.group('between')}{m.group('q')}{REDACTED}{m.group('q')}"
         return m.group(0)
 
     text = _ASSIGN_LITERAL_RE.sub(assigned, text)
@@ -114,7 +119,19 @@ def _secret_named(target: ast.AST) -> bool:
 
 def _secret_value_nodes(tree: ast.AST) -> Iterator[ast.AST]:
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and any(_secret_named(t) for t in node.targets):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            args = node.args
+            positional = args.posonlyargs + args.args
+            if args.defaults:
+                for arg, default in zip(
+                    positional[-len(args.defaults) :], args.defaults, strict=True
+                ):
+                    if SECRET_NAME_RE.search(arg.arg):
+                        yield default
+            for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True):
+                if default is not None and SECRET_NAME_RE.search(arg.arg):
+                    yield default
+        elif isinstance(node, ast.Assign) and any(_secret_named(t) for t in node.targets):
             yield node.value
         elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and node.value:
             if _secret_named(node.target):
@@ -137,56 +154,125 @@ def _secret_value_nodes(tree: ast.AST) -> Iterator[ast.AST]:
                     yield value
 
 
-def secret_literal_values(tree: ast.AST) -> set[str]:
-    """Secret-like source values for report-wide redaction."""
+def _numeric_literal_value(node: ast.AST) -> int | float | complex | None:
+    if isinstance(node, ast.Constant):
+        value = node.value
+        if type(value) in (int, float, complex):
+            return value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        operand = _numeric_literal_value(node.operand)
+        if operand is not None:
+            return +operand if isinstance(node.op, ast.UAdd) else -operand
+    return None
 
-    def secret_like(text: str) -> bool:
-        return len(text) >= 8 and (
-            len(text) >= 16 or any(c.isdigit() or not c.isalnum() for c in text)
-        )
 
-    secrets: set[str] = set()
+def _secret_literal_nodes(value: ast.AST) -> Iterator[ast.AST]:
+    """Literal leaves and complete numeric unary expressions in a secret value."""
+    if _numeric_literal_value(value) is not None:
+        yield value
+        return
+    if (isinstance(value, ast.Constant) and isinstance(value.value, (str, bytes))) or isinstance(
+        value, ast.JoinedStr
+    ):
+        yield value
+    for child in ast.iter_child_nodes(value):
+        yield from _secret_literal_nodes(child)
+
+
+def _fold_string_literal(node: ast.AST) -> str | bytes | None:
+    """Fold only constant string or bytes additions; never evaluate other code."""
+    if isinstance(node, ast.Constant) and type(node.value) in (str, bytes):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _fold_string_literal(node.left)
+        right = _fold_string_literal(node.right)
+        if left is not None and type(left) is type(right):
+            return left + right
+    return None
+
+
+def _literal_text(value: str | bytes) -> str:
+    return value.decode("utf-8", errors="ignore") if isinstance(value, bytes) else value
+
+
+def _source_secret_literals(tree: ast.AST, source: str | None = None) -> Iterator[str]:
+    """Literal values and stripped lines from secret-named source expressions."""
     for value in _secret_value_nodes(tree):
-        for node in ast.walk(value):
+        folded = _fold_string_literal(value)
+        if folded is not None:
+            yield _literal_text(folded)
+        for node in _secret_literal_nodes(value):
+            numeric = _numeric_literal_value(node)
+            if numeric is not None:
+                yield str(numeric)
+                if isinstance(node, ast.UnaryOp) and isinstance(node.operand, ast.Constant):
+                    operand = _numeric_literal_value(node.operand)
+                    if operand is not None:
+                        yield str(operand)
+                        if source is not None:
+                            spelling = ast.get_source_segment(source, node.operand)
+                            if spelling is not None:
+                                yield spelling
+                continue
             if not isinstance(node, ast.Constant) or not isinstance(node.value, (str, bytes)):
                 continue
-            literal = (
-                node.value.decode("utf-8", errors="ignore")
-                if isinstance(node.value, bytes)
-                else node.value
-            )
-            if secret_like(literal):
-                secrets.add(literal)
+            literal = _literal_text(node.value)
+            yield literal
             if "\n" in literal or "\r" in literal:
                 for line in literal.splitlines():
-                    line = line.strip()
-                    if len(line) >= MIN_SECRET_PART_LENGTH and secret_like(line):
-                        secrets.add(line)
-    return secrets
+                    yield line.strip()
 
 
-def drop_secret_fixes(findings: list[Finding], secrets: Iterable[str]) -> list[Finding]:
+def secret_literal_values(tree: ast.AST, source: str | None = None) -> set[str]:
+    """Secret-like source values for report-wide redaction."""
+    return {
+        text
+        for text in _source_secret_literals(tree, source)
+        if len(text) >= MIN_SECRET_PART_LENGTH
+        and (len(text) >= 16 or any(c.isdigit() or not c.isalnum() for c in text))
+    }
+
+
+def file_secret_literal_values(tree: ast.AST, source: str | None = None) -> set[str]:
+    """Decoded and raw spellings of masked literals, scoped to their source file."""
+    values = {
+        text for text in _source_secret_literals(tree, source) if len(text) >= MIN_SECRET_LENGTH
+    }
+    if source is not None:
+        for start, end in secret_literal_spans(source, tree):
+            raw = source[start:end]
+            if len(raw) >= MIN_SECRET_LENGTH:
+                values.add(raw)
+            match = re.match(r"(?i)^[rubf]*(?P<quote>'''|\"\"\"|'|\")", raw)
+            if match and raw.endswith(match.group("quote")):
+                inside = raw[match.end() : -len(match.group("quote"))]
+                if len(inside) >= MIN_SECRET_LENGTH:
+                    values.add(inside)
+    return values
+
+
+def drop_secret_fixes(
+    findings: list[Finding],
+    secrets: Iterable[str],
+    file_secrets: Mapping[str, set[str]] | None = None,
+) -> list[Finding]:
     """Discard fixes whose edit or description contains a known secret."""
-    known = tuple(secret for secret in secrets if secret)
+    known = {secret for secret in secrets if secret}
     out = []
     for finding in findings:
+        scoped = known | (file_secrets or {}).get(finding.location.path, set())
         fix = finding.fix
         if fix is not None and any(
             secret in fix.description or any(secret in edit.replacement for edit in fix.edits)
-            for secret in known
+            for secret in scoped
         ):
             finding = replace(finding, fix=None)
         out.append(finding)
     return out
 
 
-def mask_secret_literals(source: str, tree: ast.AST) -> str:
-    """`source` with every string literal assigned to a secret-looking name (`api_key =
-    (...)`, `password="..."`, `{"token": ...}`) masked character for character, including
-    implicitly joined and triple-quoted strings that line-based patterns cannot see.
-
-    Lines and character columns are unchanged, so masked source can be shown as context
-    or have fix edits applied to it for a diff."""
+def secret_literal_spans(source: str, tree: ast.AST) -> list[tuple[int, int]]:
+    """Character offsets of secret literals, excluding spans inside a larger literal."""
     starts = [0] + [m.end() for m in _LINE_END_RE.finditer(source)]
 
     def offset(line: int, byte_col: int) -> int:  # AST (line, UTF-8 column) -> str index
@@ -195,43 +281,79 @@ def mask_secret_literals(source: str, tree: ast.AST) -> str:
         prefix = source[base:nxt].encode("utf-8")[:byte_col]
         return base + len(prefix.decode("utf-8", errors="ignore"))
 
-    chars = list(source)
+    spans: set[tuple[int, int]] = set()
     for value in _secret_value_nodes(tree):
-        for lit in ast.walk(value):
-            if isinstance(lit, ast.JoinedStr) or (
-                isinstance(lit, ast.Constant) and isinstance(lit.value, (str, bytes))
-            ):
-                start = offset(lit.lineno, lit.col_offset)
-                end = offset(lit.end_lineno, lit.end_col_offset)
-                for i in range(start, end):
-                    if chars[i] not in "\r\n":
-                        chars[i] = "*"
+        for lit in _secret_literal_nodes(value):
+            start = offset(lit.lineno, lit.col_offset)
+            end = offset(lit.end_lineno, lit.end_col_offset)
+            spans.add((start, end))
+    ordered = sorted(spans, key=lambda span: (span[0], -span[1]))
+    maximal: list[tuple[int, int]] = []
+    for start, end in ordered:
+        if not maximal or start >= maximal[-1][1]:
+            maximal.append((start, end))
+        elif end > maximal[-1][1]:
+            maximal[-1] = (maximal[-1][0], end)
+    return maximal
+
+
+def mask_secret_literals(source: str, tree: ast.AST) -> str:
+    """`source` with every literal assigned to a secret-looking name (`api_key =
+    (...)`, `password="..."`, `{"token": ...}`) masked character for character, including
+    implicitly joined and triple-quoted strings that line-based patterns cannot see.
+
+    Lines and character columns are unchanged, so masked source can be shown as context
+    or have fix edits applied to it for a diff."""
+    chars = list(source)
+    for start, end in secret_literal_spans(source, tree):
+        for i in range(start, end):
+            if chars[i] not in "\r\n":
+                chars[i] = "*"
     return "".join(chars)
 
 
-def redact_findings(findings: list[Finding], secrets: Iterable[str]) -> list[Finding]:
-    secrets = [s for s in set(secrets) if len(s) >= MIN_SECRET_LENGTH]
+def redact_findings(
+    findings: list[Finding],
+    secrets: Iterable[str],
+    *,
+    tool_secrets: Iterable[str] = (),
+    file_secrets: Mapping[str, set[str]] | None = None,
+) -> list[Finding]:
+    secrets = {s for s in secrets if len(s) >= MIN_SECRET_LENGTH}
+    tool_secrets = [s for s in set(tool_secrets) if s]
     out = []
     for f in findings:
+        scoped = secrets | (file_secrets or {}).get(f.location.path, set())
+
+        def clean(text: str, known: set[str] = scoped) -> str:
+            return redact_text(text, known, literals=False, tool_secrets=tool_secrets)
+
+        rule_id = clean(f.rule_id)
+        related_rules = tuple(clean(rule) for rule in f.related_rules)
         if f.vuln_class == SECRET:
             generic = f"Possible hard-coded secret reported by {', '.join(f.sources)}."
             new = replace(
                 f,
+                rule_id=rule_id,
+                related_rules=related_rules,
+                vuln_class=clean(f.vuln_class),
+                function=clean(f.function) if f.function is not None else None,
                 message=generic,
-                snippet=redact_code(f.snippet, secrets),
-                sink=redact_code(f.sink, secrets),
+                snippet=redact_code(f.snippet, scoped, tool_secrets=tool_secrets),
+                sink=redact_code(f.sink, scoped, tool_secrets=tool_secrets),
                 evidence=tuple(
-                    replace(e, message=f"{e.producer} reported a secret ({f.rule_id}).")
+                    replace(e, message=f"{e.producer} reported a secret ({rule_id}).")
                     for e in f.evidence
                 ),
+                fix=_clean_fix(f.fix, clean),
             )
         else:
-
-            def clean(text: str) -> str:
-                return redact_text(text, secrets, literals=False)
-
             new = replace(
                 f,
+                rule_id=rule_id,
+                related_rules=related_rules,
+                vuln_class=clean(f.vuln_class),
+                function=clean(f.function) if f.function is not None else None,
                 message=clean(f.message),
                 snippet=clean(f.snippet),
                 sink=clean(f.sink),

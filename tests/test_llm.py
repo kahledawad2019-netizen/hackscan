@@ -144,8 +144,82 @@ def test_fence_is_random_per_request(tmp_path):
 
 GUARDS = [
     ('    if cmd not in {"ls", "pwd"}:\n        return\n', 4),
-    ("    if not cmd.isalnum():\n        raise ValueError(cmd)\n", 4),
+    ("    if not cmd.isdigit():\n        raise ValueError(cmd)\n", 4),
+    ("    if not cmd.isdecimal():\n        return\n", 4),
 ]
+
+
+@pytest.mark.parametrize(
+    ("source", "rule_id", "suppressed"),
+    [
+        (
+            "import os\ndef run(cmd):\n    if not cmd.isidentifier(): return\n    os.system(cmd)\n",
+            "HS-CMDI-001",
+            False,
+        ),
+        (
+            "import os\ndef run(cmd):\n    if not cmd.isnumeric(): return\n    os.system(cmd)\n",
+            "HS-CMDI-001",
+            False,
+        ),
+        (
+            "import os\ndef run(cmd):\n    if not cmd.isalpha(): return\n    os.system(cmd)\n",
+            "HS-CMDI-001",
+            False,
+        ),
+        (
+            "def run(cur, uid):\n    if not uid.isalnum(): return\n"
+            '    cur.execute("SELECT * FROM users WHERE id = " + uid)\n',
+            "HS-SQLI-001",
+            False,
+        ),
+        (
+            "def run(name):\n    if not name.isidentifier(): return\n    eval(name)\n",
+            "HS-CODEI-001",
+            False,
+        ),
+        (
+            "import os\ndef run(cmd):\n    if not cmd.isdigit(): return\n    os.system(cmd)\n",
+            "HS-CMDI-001",
+            True,
+        ),
+    ],
+)
+def test_predicate_guards_only_accept_decimal_digits(tmp_path, source, rule_id, suppressed):
+    (finding,) = [
+        f
+        for f in run(
+            tmp_path,
+            source,
+            FakeOllama(
+                answer("false_positive", line=3 if rule_id == "HS-CMDI-001" else 2, kind="guard")
+            ),
+        ).findings
+        if f.rule_id == rule_id
+    ]
+    assert (finding.status is Status.SUPPRESSED) is suppressed
+
+
+def test_walrus_secret_is_absent_from_llm_request(tmp_path):
+    secret = "correcthorsebat"
+    fake = FakeOllama(answer())
+    run(tmp_path, f'import os\ndef run(cmd):\n    os.system(api_token := "{secret}" + cmd)\n', fake)
+    assert fake.requests
+    assert secret not in json.dumps(fake.requests)
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        'import os\nhandler = lambda cmd, token="lambda-secret-222": os.system(cmd)\n',
+        'import os\ndef run(cmd, password=(\n    "multiline-secret-222"\n)):\n    os.system(cmd)\n',
+    ],
+)
+def test_secret_parameter_defaults_are_absent_from_llm_request(tmp_path, code):
+    fake = FakeOllama(answer())
+    run(tmp_path, code, fake)
+    assert fake.requests
+    assert "secret-222" not in json.dumps(fake.requests)
 
 
 @pytest.mark.parametrize(("body", "line"), GUARDS)
@@ -375,6 +449,14 @@ def test_context_is_redacted(tmp_path):
 GREP = "import os\nimport subprocess\n\ndef search(pattern):\n    os.system(f'grep -r -- {pattern} .')\n"
 
 
+@pytest.mark.parametrize(("conversion", "kept"), [("d", False), ("s", True)])
+def test_llm_command_percent_conversion_fix(tmp_path, conversion, kept):
+    code = f'import os\nimport subprocess\n\ndef run(n):\n    os.system("ls %{conversion}" % n)\n'
+    fixed = "subprocess.call(['ls', str(n)])"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert (f.fix is not None) is kept
+
+
 def test_valid_llm_fix_is_kept(tmp_path):
     fixed = "subprocess.run(['grep', '-r', '--', pattern, '.'], check=False)"
     code = GREP
@@ -382,6 +464,86 @@ def test_valid_llm_fix_is_kept(tmp_path):
     (f,) = report.findings
     assert f.fix is not None and f.fix.producer == "llm"
     assert f.fix.edits[0].replacement == fixed
+
+
+def test_llm_rejects_outer_nested_eval_fix(tmp_path):
+    code = "import ast\n\ndef f(x):\n    return eval(eval(x))\n"
+    fixed = "ast.literal_eval(eval(x))"
+    report = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed)))
+    by_sink = {f.sink: f for f in report.findings}
+    assert by_sink["eval(eval(x))"].fix is None
+
+
+def test_llm_rejects_outer_fix_containing_nested_weak_hash(tmp_path):
+    code = (
+        "import hashlib\nimport os\nimport subprocess\n\n"
+        'def f(x):\n    os.system("ls " + hashlib.md5(x).hexdigest())\n'
+    )
+    fixed = "subprocess.call(['ls', hashlib.md5(x).hexdigest()])"
+    report = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed)))
+    by_sink = {f.sink: f for f in report.findings}
+    assert by_sink['os.system("ls " + hashlib.md5(x).hexdigest())'].fix is None
+
+
+@pytest.mark.parametrize(
+    ("fixed", "kept"),
+    [
+        ("ast.literal_eval(builtins.__dict__['eval'](cmd))", False),
+        ("json.loads(getattr(builtins, 'ev'+'al')(cmd))", False),
+        ("ast.literal_eval(cmd.strip())", False),
+        ("ast.literal_eval(cmd)", True),
+        ("json.loads(cmd)", True),
+    ],
+)
+def test_llm_code_fix_must_keep_exact_argument(tmp_path, fixed, kept):
+    code = "import ast\nimport json\nimport builtins\n\ndef run(cmd):\n    return eval(cmd)\n"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert (f.fix is not None) is kept
+
+
+def test_llm_code_fix_rejects_extra_original_arguments(tmp_path):
+    code = "import ast\n\ndef run(cmd, scope):\n    return eval(cmd, scope)\n"
+    fixed = "ast.literal_eval(cmd)"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert f.fix is None
+
+
+def test_llm_code_fix_resolves_import_alias(tmp_path):
+    code = "import ast as syntax\n\ndef run(cmd):\n    return eval(cmd)\n"
+    fixed = "syntax.literal_eval(cmd)"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert f.fix is not None
+
+
+@pytest.mark.parametrize(
+    ("fixed", "kept"),
+    [
+        (
+            "subprocess.call(['grep', '-r', '--', pattern, '.'], timeout=builtins.__dict__['eval'](pattern))",
+            False,
+        ),
+        ("subprocess.call(['grep', '-r', '--', pattern, '.'], timeout=5)", True),
+    ],
+)
+def test_llm_command_fix_keywords_must_be_literals(tmp_path, fixed, kept):
+    code = GREP.replace("import subprocess\n", "import subprocess\nimport builtins\n")
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert (f.fix is not None) is kept
+
+
+@pytest.mark.parametrize(
+    ("fixed", "kept"),
+    [
+        ("hashlib.sha256(data)", True),
+        ("hashlib.sha256(data + b'x')", False),
+        ("hashlib.sha256(data, usedforsecurity=False)", True),
+        ("hashlib.sha256(data, usedforsecurity=True)", False),
+    ],
+)
+def test_llm_weak_crypto_fix_must_keep_exact_arguments(tmp_path, fixed, kept):
+    code = "import hashlib\n\ndef run(data):\n    return hashlib.md5(data).hexdigest()\n"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert (f.fix is not None) is kept
 
 
 @pytest.mark.parametrize(
@@ -487,6 +649,157 @@ def test_llm_fix_must_keep_extra_shell_syntax(tmp_path):
 
 
 SQL = "import django.db\n\ndef get(cur, uid):\n    cur.raw(f\"SELECT name FROM users WHERE id = '{uid}'\")\n"
+
+
+def test_llm_sql_fix_refuses_sole_dynamic_values_list(tmp_path):
+    code = (
+        "import sqlite3\ndef get(cur, x):\n"
+        '    cur.execute("INSERT INTO t(a,b) VALUES (" + x + ")")\n'
+    )
+    fixed = "cur.execute('INSERT INTO t(a,b) VALUES (?)', (x,))"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert f.fix is None
+
+
+@pytest.mark.parametrize(("conversion", "kept"), [("d", False), ("s", True)])
+def test_llm_sql_percent_conversion_fix(tmp_path, conversion, kept):
+    code = (
+        "import sqlite3\ndef get(cur, x):\n"
+        f'    cur.execute("SELECT id FROM t WHERE id = %{conversion}" % x)\n'
+    )
+    fixed = "cur.execute('SELECT id FROM t WHERE id = ?', (x,))"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert (f.fix is not None) is kept
+
+
+@pytest.mark.parametrize(
+    ("query", "comparison", "literal"),
+    [
+        ("f\"SELECT id FROM t WHERE note LIKE 'abc%' AND id = {x}\"", "LIKE", "abc%"),
+        ("\"SELECT id FROM t WHERE note = '100%%' AND id = %s\" % x", "=", "100%"),
+    ],
+)
+@pytest.mark.parametrize(("module", "placeholder"), [("psycopg2", "%s"), ("sqlite3", "?")])
+@pytest.mark.parametrize("escaped", [True, False])
+def test_llm_sql_literal_percent_requires_driver_escape(
+    tmp_path, query, comparison, literal, module, placeholder, escaped
+):
+    code = f"import {module}\ndef get(cur, x):\n    cur.execute({query})\n"
+    sql_literal = literal.replace("%", "%%") if escaped else literal
+    sql = f"SELECT id FROM t WHERE note {comparison} '{sql_literal}' AND id = {placeholder}"
+    fixed = f"cur.execute({sql!r}, (x,))"
+    (finding,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert (finding.fix is not None) is (escaped == (placeholder == "%s"))
+
+
+def test_llm_sql_fix_refuses_multiple_values_from_one_fragment(tmp_path):
+    code = (
+        'import sqlite3\ndef get(cur, x):\n    cur.execute("INSERT INTO t VALUES (" + x + ", 1)")\n'
+    )
+    fixed = "cur.execute('INSERT INTO t VALUES (?, 1)', (x,))"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert f.fix is None
+
+
+def test_llm_sql_fix_refuses_mysql_backslash_escaped_quote(tmp_path):
+    code = r"""import pymysql
+def get(cur, x):
+    cur.execute("SELECT * FROM t WHERE note = '\\' AND id = " + x + "'")
+"""
+    fixed = r"""cur.execute("SELECT * FROM t WHERE note = '\\' AND id = %s'", (x,))"""
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert f.fix is None
+
+
+@pytest.mark.parametrize(
+    ("query", "fixed"),
+    [
+        (
+            "f'SELECT * FROM t WHERE a = \"{v}\"'",
+            "cur.execute('SELECT * FROM t WHERE a = ?', (v,))",
+        ),
+        (
+            "f'SELECT * FROM t WHERE a = \"pre{v}\"'",
+            "cur.execute('SELECT * FROM t WHERE a = pre?', (v,))",
+        ),
+        (
+            "f'''SELECT * FROM t WHERE note = 'a\"b' AND a = \"{v}\"'''",
+            'cur.execute("SELECT * FROM t WHERE note = \'a\\"b\' AND a = ?", (v,))',
+        ),
+        (
+            'f"SELECT $q$id={v}$q$"',
+            "cur.execute('SELECT $q$id=?$q$', (v,))",
+        ),
+        (
+            'f"SELECT $$id={v}$$"',
+            "cur.execute('SELECT $$id=?$$', (v,))",
+        ),
+    ],
+)
+def test_llm_sql_fix_refuses_identifiers_and_dollar_text(tmp_path, query, fixed):
+    code = f"import sqlite3\ndef get(cur, v):\n    cur.execute({query})\n"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert f.fix is None
+
+
+@pytest.mark.parametrize(
+    ("query", "fixed"),
+    [
+        (
+            "f\"SELECT * FROM t WHERE a = '{v}'\"",
+            "cur.execute('SELECT * FROM t WHERE a = ?', (v,))",
+        ),
+        (
+            'f"SELECT * FROM t WHERE a = {v}"',
+            "cur.execute('SELECT * FROM t WHERE a = ?', (v,))",
+        ),
+        (
+            'f"""SELECT * FROM t WHERE note = "a\'b" AND a = \'{v}\'"""',
+            'cur.execute("SELECT * FROM t WHERE note = \\"a\'b\\" AND a = ?", (v,))',
+        ),
+    ],
+)
+def test_llm_sql_fix_keeps_value_positions(tmp_path, query, fixed):
+    code = f"import sqlite3\ndef get(cur, v):\n    cur.execute({query})\n"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert f.fix is not None
+
+
+@pytest.mark.parametrize(
+    ("query", "fixed", "kept"),
+    [
+        (
+            "f\"SELECT 1 WHERE 'foo''' = '{x}'''\"",
+            "cur.execute(\"SELECT 1 WHERE 'foo''' = ?''\", (x,))",
+            False,
+        ),
+        (
+            "f\"SELECT 1 WHERE a = '{x}'''\"",
+            "cur.execute(\"SELECT 1 WHERE a = ?''\", (x,))",
+            False,
+        ),
+        (
+            '"SELECT 1 WHERE a = \'" + x + "\'" + "\'\'"',
+            "cur.execute(\"SELECT 1 WHERE a = ?''\", (x,))",
+            False,
+        ),
+        (
+            "f\"SELECT 1 WHERE a = '''{x}'\"",
+            "cur.execute(\"SELECT 1 WHERE a = ''?\", (x,))",
+            False,
+        ),
+        ("f\"SELECT 1 WHERE a = '{x}'\"", "cur.execute('SELECT 1 WHERE a = ?', (x,))", True),
+        (
+            "f\"SELECT 1 WHERE a = '{x}' AND b = 'y'\"",
+            "cur.execute(\"SELECT 1 WHERE a = ? AND b = 'y'\", (x,))",
+            True,
+        ),
+    ],
+)
+def test_llm_sql_fix_only_binds_entire_single_quoted_literal(tmp_path, query, fixed, kept):
+    code = f"import sqlite3\ndef get(cur, x):\n    cur.execute({query})\n"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert (f.fix is not None) is kept
 
 
 @pytest.mark.parametrize(
