@@ -35,9 +35,9 @@ from urllib.parse import urlparse
 
 from hackscan.analyzers.remediate import _call_at, _node_region, apply_edits
 from hackscan.core.models import Evidence, Finding, Fix, FixEdit, Status
-from hackscan.core.redact import mask_secret_literals, redact_secretish
+from hackscan.core.redact import redact_secretish
 from hackscan.importers.common import SourceIndex
-from hackscan.plugins.base import _NEWLINE_RE, FileContext
+from hackscan.plugins.base import FileContext
 
 PRODUCER = "llm"
 PROMPT_VERSION = "3"
@@ -157,16 +157,13 @@ def triage(
         )
         queue = queue[: config.max_findings]
     cache = _Cache(config.cache_dir)
-    masked = None  # (ctx, masked lines) of the current file
     for i in queue:
         finding = findings[i]
         loaded = index.context(finding.location.path)
         if loaded is None:
             continue
         ctx, _ = loaded
-        if masked is None or masked[0] is not ctx:
-            masked = (ctx, _NEWLINE_RE.split(mask_secret_literals(ctx.source, ctx.tree)))
-        lines = masked[1]
+        lines = ctx.masked_lines
         context, first_line = _context(ctx, finding, secrets, lines)
         flagged = finding.sink or finding.snippet
         span = range(finding.location.start_line - 1, finding.location.end_line)
@@ -550,7 +547,9 @@ def _llm_fix(finding: Finding, replacement: str, ctx: FileContext, rescan) -> Fi
     if not isinstance(expr, ast.Call):
         return None
     call = _call_at(ctx, finding.location)
-    if call is None or not _plausible_rewrite(finding.vuln_class, call, expr, ctx):
+    if call is None or ctx.has_secret_literal(call):
+        return None  # a fix carries the call's real code, secrets included
+    if not _plausible_rewrite(finding.vuln_class, call, expr, ctx):
         return None
     fix = Fix(
         "LLM-suggested rewrite (validated: parses, and the rule no longer fires).",
@@ -641,7 +640,7 @@ def _plausible_rewrite(vuln_class: str, original: ast.Call, new: ast.Call, ctx) 
             and isinstance(original.func, ast.Attribute)
             and func.attr == original.func.attr
             and ast.dump(func.value) == ast.dump(original.func.value)
-            and _same_sql(original, new)
+            and _same_sql(original, new, ctx)
         )
     allowed = SAFE_REWRITES.get(vuln_class)
     if not allowed:
@@ -652,12 +651,6 @@ def _plausible_rewrite(vuln_class: str, original: ast.Call, new: ast.Call, ctx) 
     return vuln_class != "cmdi" or _same_program(original, new, ctx)
 
 
-# A rewrite must not hand the value to another interpreter (`sh -c`, `python -c`...).
-SHELL_PROGRAMS = {
-    "sh", "bash", "dash", "zsh", "ksh", "csh", "tcsh", "fish", "busybox", "env", "xargs",
-    "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe", "wsl", "start",
-    "python", "python3", "py", "perl", "ruby", "node", "php", "lua", "osascript", "eval",
-}  # fmt: skip
 # Keywords that cannot change which program runs or what it receives as arguments.
 SAFE_SUBPROCESS_KEYWORDS = {
     "check", "capture_output", "text", "timeout", "stdout", "stderr", "encoding", "errors",
@@ -684,7 +677,8 @@ def _same_value(a: ast.AST, b: ast.AST) -> bool:
 
 def _same_program(original: ast.Call, new: ast.Call, ctx: FileContext) -> bool:
     """The rewrite's argv is exactly the one HackScan derives from the original command
-    (same program, words and values, in order; nothing added); never a shell."""
+    (same program, words and values, in order; nothing added). `_argv` itself refuses
+    interpreters and values in option-argument positions."""
     from hackscan.analyzers.remediate import _argv
 
     if not original.args or len(new.args) != 1:
@@ -698,20 +692,14 @@ def _same_program(original: ast.Call, new: ast.Call, ctx: FileContext) -> bool:
         return False
     wanted = [ast.parse(src, mode="eval").body for src in expected]
     argv = new.args[0].elts
-    if len(argv) != len(wanted) or not all(map(_same_value, argv, wanted)):
-        return False
-    program = wanted[0]
-    if not (isinstance(program, ast.Constant) and isinstance(program.value, str)):
-        return False
-    name = program.value.replace("\\", "/").rsplit("/", 1)[-1].lower()
-    return name not in SHELL_PROGRAMS
+    return len(argv) == len(wanted) and all(map(_same_value, argv, wanted))
 
 
-def _same_sql(original: ast.Call, new: ast.Call) -> bool:
+def _same_sql(original: ast.Call, new: ast.Call, ctx: FileContext) -> bool:
     """The rewrite is exactly the parameterized query HackScan derives from the original
     (same text, comments and line breaks; placeholders in the same places) with the
     original values as parameters, in order."""
-    from hackscan.analyzers.remediate import _parameterize, _sql_parts
+    from hackscan.analyzers.remediate import _parameterize, _placeholder, _sql_parts
 
     if not original.args or len(new.args) != 2 or new.keywords:
         return False
@@ -723,13 +711,17 @@ def _same_sql(original: ast.Call, new: ast.Call) -> bool:
     parts = _sql_parts(original.args[0])
     if parts is None:
         return False
-    for placeholder in ("?", "%s"):
-        sql, values = _parameterize(parts, placeholder)
-        if sql is not None and values and sql == query.value:
-            return len(params.elts) == len(values) and all(
-                ast.dump(a) == ast.dump(b) for a, b in zip(params.elts, values, strict=True)
-            )
-    return False
+    # The placeholder style must be the one the file's driver uses (`?` breaks psycopg);
+    # with no or several known drivers there is no way to tell, so no fix.
+    placeholder = _placeholder(ctx)
+    if placeholder is None:
+        return False
+    sql, values = _parameterize(parts, placeholder)
+    if sql is None or not values or sql != query.value:
+        return False
+    return len(params.elts) == len(values) and all(
+        ast.dump(a) == ast.dump(b) for a, b in zip(params.elts, values, strict=True)
+    )
 
 
 def _dotted(expr: ast.AST) -> set[str]:

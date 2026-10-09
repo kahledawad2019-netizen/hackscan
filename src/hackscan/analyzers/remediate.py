@@ -70,8 +70,8 @@ def _fix_for(f: Finding, index: SourceIndex) -> Fix | None:
         return None
     ctx, _ = loaded
     call = _call_at(ctx, f.location)
-    if call is None:
-        return None
+    if call is None or ctx.has_secret_literal(call):
+        return None  # a fix carries the call's real code, secrets included
     try:
         proposal = builder(call, ctx)
     except (ValueError, SyntaxError):
@@ -233,7 +233,8 @@ def _cmdi(call: ast.Call, ctx: FileContext):
     if "os.system" in names and len(call.args) == 1 and not call.keywords:
         # subprocess.call returns the exit status, like os.system.
         return (
-            "Run the program with an argument list (no shell), so input cannot add commands.",
+            "Run the program with an argument list (no shell), so input cannot add commands. "
+            "Review: a value starting with '-' can still be read as an option.",
             f"subprocess.call({argv_src})",
             ("subprocess",),
         )
@@ -244,7 +245,8 @@ def _cmdi(call: ast.Call, ctx: FileContext):
         kwargs = [ctx.segment(k) for k in call.keywords if k.arg != "shell"]
         args = ", ".join([argv_src, *rest, *kwargs])
         return (
-            "Pass an argument list and drop shell=True, so input cannot add commands.",
+            "Pass an argument list and drop shell=True, so input cannot add commands. "
+            "Review: a value starting with '-' can still be read as an option.",
             f"{ctx.segment(call.func)}({args})",
             (),
         )
@@ -263,11 +265,13 @@ def _argv(expr: ast.AST, ctx: FileContext) -> list[str] | None:
         for n in ast.walk(expr)
     )
     argv: list[str] = []
+    literal: list[str | None] = []  # the word, or None for a dynamic value
     for i, part in enumerate(parts):
         if isinstance(part, str):
             if SHELL_META & set(part):
                 return None  # quoting, pipes, globbing...: shell semantics we cannot keep
             argv.extend(repr(token) for token in part.split())
+            literal.extend(part.split())
             continue
         prev = parts[i - 1] if i > 0 else None
         nxt = parts[i + 1] if i + 1 < len(parts) else None
@@ -277,7 +281,47 @@ def _argv(expr: ast.AST, ctx: FileContext) -> list[str] | None:
             return None  # glued to the following text
         text = ctx.segment(part)
         argv.append(f"str({text})" if stringify else text)
-    return argv or None
+        literal.append(None)
+    if not argv or not _argv_is_inert(literal):
+        return None
+    return argv
+
+
+# Programs that run their arguments as code or commands (`sh -c`, `python3.12 -c`,
+# `env cmd`, `xargs cmd`): an argument list does not make a dynamic value safe there.
+INTERPRETERS = {
+    "sh", "bash", "dash", "zsh", "ksh", "mksh", "csh", "tcsh", "fish", "ash", "busybox",
+    "env", "xargs", "nohup", "nice", "ionice", "timeout", "stdbuf", "sudo", "doas", "su",
+    "runuser", "chroot", "strace", "watch", "script", "exec", "eval", "start", "call",
+    "cmd", "command", "powershell", "pwsh", "wsl", "wscript", "cscript", "mshta",
+    "python", "py", "pypy", "ipython", "perl", "ruby", "irb", "node", "nodejs", "deno",
+    "bun", "php", "lua", "luajit", "tclsh", "wish", "osascript", "awk", "gawk", "mawk",
+    "nawk", "sed", "ssh", "rsh", "make", "gdb", "vim", "vi", "emacs", "expect",
+}  # fmt: skip
+_VERSION_SUFFIX_RE = re.compile(r"[\d.\-]+$")
+
+
+def program_name(literal: str) -> str:
+    """`/usr/bin/python3.12.exe` -> `python` (basename, no extension or version)."""
+    name = literal.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    for ext in (".exe", ".com", ".bat", ".cmd", ".ps1"):
+        if name.endswith(ext):
+            name = name[: -len(ext)]
+    return _VERSION_SUFFIX_RE.sub("", name) or name
+
+
+def _argv_is_inert(words: list[str | None]) -> bool:
+    """The program is a fixed word that is not an interpreter, and no dynamic value may
+    be an option's argument (`git -c VALUE` can define an alias that runs commands).
+    Whether a flag takes an argument is program-specific, so a value right after any
+    flag is refused; after `--` (end of options) it is a plain operand."""
+    program = words[0]
+    if program is None or program_name(program) in INTERPRETERS:
+        return False
+    return not any(
+        value is None and prev is not None and prev.startswith("-") and prev != "--"
+        for prev, value in zip(words, words[1:], strict=False)
+    )
 
 
 # -- code injection / weak hashing ----------------------------------------------------------

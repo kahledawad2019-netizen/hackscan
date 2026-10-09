@@ -102,6 +102,10 @@ def _secret_named(target: ast.AST) -> bool:
         return isinstance(target.slice.value, str) and bool(
             SECRET_NAME_RE.search(target.slice.value)
         )
+    if isinstance(target, (ast.Tuple, ast.List)):  # `api_key, x = ...`: mask all of it
+        return any(_secret_named(e) for e in target.elts)
+    if isinstance(target, ast.Starred):
+        return _secret_named(target.value)
     return False
 
 
@@ -116,7 +120,7 @@ def mask_secret_literals(source: str, tree: ast.AST) -> str:
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and any(_secret_named(t) for t in node.targets):
             values.append(node.value)
-        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and node.value:
             if _secret_named(node.target):
                 values.append(node.value)
         elif isinstance(node, ast.keyword) and node.arg and SECRET_NAME_RE.search(node.arg):

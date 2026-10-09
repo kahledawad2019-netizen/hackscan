@@ -328,18 +328,30 @@ def _with(result: ScanResult, findings: list[Finding]) -> ScanResult:
 
 def _diff(result: ScanResult, finding: Finding) -> str:
     import ast
+    import difflib
 
-    from hackscan.analyzers.remediate import fix_diff
+    from hackscan.analyzers.remediate import apply_edits
     from hackscan.core.redact import mask_secret_literals
 
     try:
         path = result.root / finding.location.path
         source = path.read_text(encoding="utf-8")
-        # Masking keeps lines and columns, so the fix applies to the masked source.
-        masked = mask_secret_literals(source, ast.parse(source))
-        diff = fix_diff(masked, finding.fix, finding.location.path)
+        fixed = apply_edits(source, finding.fix.edits)
+        # Each side is masked from its own syntax tree: the replacement may carry a
+        # secret too (e.g. a copied `password="..."` keyword).
+        before = mask_secret_literals(source, ast.parse(source))
+        after = mask_secret_literals(fixed, ast.parse(fixed))
     except (OSError, UnicodeDecodeError, ValueError, SyntaxError):
         return ""
+    name = finding.location.path
+    diff = "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=f"a/{name}",
+            tofile=f"b/{name}",
+        )
+    )
     # Diff context shows raw source: redact anything secret-looking before printing.
     return "\n".join(redact_secretish(line, result.secrets) for line in diff.splitlines())
 

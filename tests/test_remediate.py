@@ -330,3 +330,31 @@ def test_values_lists_and_limit_still_parameterized(tmp_path: Path, query, expec
     code = f"import sqlite3\ndef f(cur, a, b):\n    cur.execute({query})\n"
     _, new = fixed_source(tmp_path, code)
     assert expected in new
+
+
+# -- Codex verify round 2: argv must not hand the value to code or an option -----------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        '"git -c " + p + " pwn"',  # git -c alias.pwn=!cmd runs a command
+        '"python3.12 -c " + p',  # interpreter, versioned name
+        '"/usr/bin/env " + p',  # wrapper that runs its argument
+        '"sh -c " + p',
+        '"C:/Tools/pwsh.exe -Command " + p',
+        'f"tar -xf {p}"',  # value right after a flag: may be its argument
+        "p",  # dynamic program
+    ],
+)
+def test_no_argv_fix_for_interpreters_or_option_arguments(tmp_path: Path, command):
+    code = f"import os\n\ndef f(p):\n    os.system({command})\n"
+    _, findings = fixes_for(tmp_path, code)
+    assert findings and all(f.fix is None for f in findings)
+
+
+def test_value_after_end_of_options_is_fixed(tmp_path: Path):
+    _, new = fixed_source(
+        tmp_path, 'import os\n\ndef f(p):\n    os.system(f"tar -cf out.tar -- {p}")\n'
+    )
+    assert "subprocess.call(['tar', '-cf', 'out.tar', '--', str(p)])" in new

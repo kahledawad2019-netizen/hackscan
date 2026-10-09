@@ -325,13 +325,11 @@ def test_context_is_redacted(tmp_path):
 # -- LLM fixes ----------------------------------------------------------------------------
 
 
-GREP = (
-    "import os\nimport subprocess\n\ndef search(pattern):\n    os.system(f'grep -r {pattern} .')\n"
-)
+GREP = "import os\nimport subprocess\n\ndef search(pattern):\n    os.system(f'grep -r -- {pattern} .')\n"
 
 
 def test_valid_llm_fix_is_kept(tmp_path):
-    fixed = "subprocess.run(['grep', '-r', pattern, '.'], check=False)"
+    fixed = "subprocess.run(['grep', '-r', '--', pattern, '.'], check=False)"
     code = GREP
     report = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed)))
     (f,) = report.findings
@@ -441,19 +439,20 @@ def test_llm_fix_must_keep_extra_shell_syntax(tmp_path):
     assert f.fix is None
 
 
-SQL = "def get(cur, uid):\n    cur.execute(f\"SELECT name FROM users WHERE id = '{uid}'\")\n"
+SQL = "import django.db\n\ndef get(cur, uid):\n    cur.raw(f\"SELECT name FROM users WHERE id = '{uid}'\")\n"
 
 
 @pytest.mark.parametrize(
     ("fixed", "kept"),
     [
-        ("cur.execute('SELECT name FROM users WHERE id = ?', (uid,))", True),
-        ("cur.execute('SELECT name FROM users WHERE id = %s', [uid])", True),
-        ("cur.execute('select name from users where id = %s', [uid])", False),  # not exact
-        ("cur.execute('DELETE FROM users WHERE id = ?', (uid,))", False),
-        ("cur.execute('SELECT name FROM users WHERE id = ? OR 1=1', (uid,))", False),
-        ("cur.execute('SELECT password FROM users WHERE id = ?', (uid,))", False),
-        ("cur.execute('SELECT name FROM users WHERE id = ' + '?', (uid,))", False),
+        ("cur.raw('SELECT name FROM users WHERE id = %s', (uid,))", True),
+        ("cur.raw('SELECT name FROM users WHERE id = %s', [uid])", True),
+        ("cur.raw('SELECT name FROM users WHERE id = ?', (uid,))", False),  # wrong driver style
+        ("cur.raw('select name from users where id = %s', [uid])", False),  # not exact
+        ("cur.raw('DELETE FROM users WHERE id = %s', (uid,))", False),
+        ("cur.raw('SELECT name FROM users WHERE id = %s OR 1=1', (uid,))", False),
+        ("cur.raw('SELECT password FROM users WHERE id = %s', (uid,))", False),
+        ("cur.raw('SELECT name FROM users WHERE id = ' + '?', (uid,))", False),
     ],
 )
 def test_llm_sql_fix_must_keep_the_query(tmp_path, fixed, kept):
@@ -463,14 +462,22 @@ def test_llm_sql_fix_must_keep_the_query(tmp_path, fixed, kept):
 
 def test_llm_sql_fix_keeps_parameter_order(tmp_path):
     code = (
-        "def get(cur, uid, tenant):\n"
-        '    cur.execute(f"SELECT name FROM users WHERE tenant = {tenant} AND id = {uid}")\n'
+        "import django.db\n\ndef get(cur, uid, tenant):\n"
+        '    cur.raw(f"SELECT name FROM users WHERE tenant = {tenant} AND id = {uid}")\n'
     )
-    good = "cur.execute('SELECT name FROM users WHERE tenant = ? AND id = ?', (tenant, uid))"
-    swapped = "cur.execute('SELECT name FROM users WHERE tenant = ? AND id = ?', (uid, tenant))"
+    good = "cur.raw('SELECT name FROM users WHERE tenant = %s AND id = %s', (tenant, uid))"
+    swapped = "cur.raw('SELECT name FROM users WHERE tenant = %s AND id = %s', (uid, tenant))"
     (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=good))).findings
     assert f.fix is not None
     (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=swapped))).findings
+    assert f.fix is None
+
+
+def test_llm_sql_fix_needs_a_known_driver(tmp_path):
+    # No driver import: `?` vs `%s` cannot be decided, so the LLM's choice is not trusted.
+    code = SQL.replace("import django.db\n\n", "")
+    fixed = "cur.raw('SELECT name FROM users WHERE id = %s', (uid,))"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
     assert f.fix is None
 
 
@@ -590,6 +597,9 @@ def test_missing_model_message_is_actionable(monkeypatch):
         ),
         ('    self.secret = f"pre-{cmd}-post-value"\n', ["pre-", "-post-value"]),
         ('    api_key = """qz1\nxw2\nvy3\n"""\n', ["qz1", "xw2", "vy3"]),  # short lines
+        ("    if (api_key := ('walrus-1' 'walrus-2')):\n        pass\n", ["walrus-1", "walrus-2"]),
+        ("    api_key, user = 'tuple-secret-1', 'bob'\n", ["tuple-secret-1"]),
+        ("    *_, token = ['x', 'star-secret-1']\n", ["star-secret-1"]),
         ('    os.system(cmd, password="kw-secret-9")\n', ["kw-secret-9"]),  # in the call
     ],
 )

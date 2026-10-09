@@ -109,7 +109,7 @@ def _to_finding(
         ),
     )
     func = ctx.enclosing_function(node)
-    sink = ctx.segment(node)
+    sink = ctx.masked_segment(node)  # secrets never enter a finding
     return Finding(
         id="",
         vuln_class=classify(plugin.rule_id, plugin.cwe),
@@ -128,7 +128,7 @@ def _to_finding(
 
 
 def _line_snippet(ctx: FileContext, start: int, end: int, max_lines: int = 5) -> str:
-    lines = ctx.lines[start - 1 : min(end, start + max_lines - 1)]
+    lines = ctx.masked_lines[start - 1 : min(end, start + max_lines - 1)]
     return "\n".join(lines)
 
 

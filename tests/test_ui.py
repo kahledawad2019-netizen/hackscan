@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 from rich.console import Console
 
@@ -115,3 +116,30 @@ def test_fix_diff_redacts_split_secrets(tmp_path):
     )
     assert "hashlib.sha256" in out
     assert "alpha12345" not in out and "beta67890" not in out
+
+
+@pytest.mark.parametrize("fmt", ["text", "json", "sarif"])
+def test_secret_inside_the_flagged_call_never_reaches_any_output(tmp_path, fmt):
+    # The template would keep the other keywords of a shell=True call, so a fix would
+    # carry the secret; snippet and sink would show it too.
+    (tmp_path / "m.py").write_text(
+        "import subprocess\n\ndef f(x):\n"
+        '    subprocess.run(f"echo {x}", shell=True, env={"API_TOKEN": "tok-secret-12345"})\n'
+    )
+    args = ["scan", str(tmp_path), "--show-fixes", "--color", "never", "--format", fmt]
+    out = CliRunner().invoke(main, args).output
+    assert "HS-CMDI-001" in out
+    assert "tok-secret-12345" not in out
+    assert "drop shell=True" not in out  # no fix: it would have to contain the secret
+
+
+def test_fix_diff_masks_secrets_on_both_sides(tmp_path):
+    # A secret-named literal on a changed line outside the call: masked in `-` and `+`.
+    (tmp_path / "m.py").write_text(
+        'import hashlib\n\ndef f(d):\n    token = "tok-secret-67890"; return hashlib.md5(d).hexdigest()\n'
+    )
+    out = (
+        CliRunner().invoke(main, ["scan", str(tmp_path), "--show-fixes", "--color", "never"]).output
+    )
+    assert "+    token = " in out and "hashlib.sha256" in out
+    assert "tok-secret-67890" not in out

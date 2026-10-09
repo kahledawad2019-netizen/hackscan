@@ -317,3 +317,11 @@ hackscan/
   gets no fix. Secret literals are masked character for character in the source
   (lines/columns kept) for LLM context and diffs. Rebinding is judged by (line, column)
   outside the cited statement; any `nonlocal`/`global` of the name voids the evidence.
+- 2026-10-09 (Codex verify round 2): an argv list stops shell injection, not argument
+  injection (`git -c alias.x=!cmd`, `python3.12 -c`). `_argv` (ground truth for template
+  and LLM fixes) now refuses interpreters/wrappers (versioned and `.exe` names included)
+  and any value directly after a flag other than `--`. LLM SQL fixes must use the
+  placeholder of the detected driver (none or ambiguous: no fix). Snippets and sinks of
+  own findings and imported ones come from masked source; a call containing a secret
+  literal gets no fix (a fix must carry the real code); diffs mask both sides from
+  their own syntax trees. Masking also covers walrus and unpacking targets.

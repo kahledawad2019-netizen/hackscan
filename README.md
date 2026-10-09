@@ -173,7 +173,13 @@ class PickleLoads(RulePlugin):
 - Taint analysis is intra-procedural: values arriving through function parameters are
   candidates, not confirmations (inter-procedural analysis is on the roadmap).
 - Python only. Imported tools may cover other languages; their findings are passed through.
-- Fix suggestions are deliberately conservative: many vulnerable lines get none.
+- Fix suggestions are deliberately conservative: many vulnerable lines get none. Command
+  fixes are never offered for interpreters/wrappers (`sh`, `python`, `env`, ...) or when a
+  value directly follows a flag (`git -c VALUE`); put `--` before operands to get one. A
+  value starting with `-` can still be read as an option, so review command fixes. No
+  fix is offered for a call that contains a secret, or for SQL containing comments.
+- String literals assigned to secret-looking names (`api_key`, `password`, `token`, ...)
+  are masked in snippets, the LLM context and fix diffs.
 
 ## Development
 

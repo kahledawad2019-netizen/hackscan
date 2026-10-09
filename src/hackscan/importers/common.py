@@ -133,7 +133,7 @@ class SourceIndex:
     def line_text(self, rel_path: str, line: int) -> str:
         loaded = self.context(rel_path)
         if loaded is not None:
-            lines = loaded[0].lines
+            lines = loaded[0].masked_lines
             return lines[line - 1] if 0 < line <= len(lines) else ""
         try:
             lines = (self.root / rel_path).read_text(encoding="utf-8", errors="replace")
@@ -168,12 +168,14 @@ class SourceIndex:
                 best = node
         if best is None:
             line_text = (
-                ctx.lines[region.start_line - 1] if region.start_line <= len(ctx.lines) else ""
+                ctx.masked_lines[region.start_line - 1]
+                if region.start_line <= len(ctx.lines)
+                else ""
             )
             func = _function_at_line(ctx, qualnames, region.start_line)
             return line_text.strip(), func
         func_node = ctx.enclosing_function(best)
-        return ctx.segment(best), qualnames.get(id(func_node)) if func_node else None
+        return ctx.masked_segment(best), qualnames.get(id(func_node)) if func_node else None
 
 
 def _span_key(ctx: FileContext, node: ast.AST) -> tuple[int, int]:

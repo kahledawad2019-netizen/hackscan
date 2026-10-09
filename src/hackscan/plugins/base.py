@@ -64,10 +64,12 @@ class FileContext:
     tree: ast.Module
     lines: list[str] = field(init=False)
     scopes: ScopeIndex = field(init=False)
+    _masked: list[str] | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.lines = _NEWLINE_RE.split(self.source)
         self.scopes = ScopeIndex(self.tree)
+        self._masked = None
 
     # -- names -------------------------------------------------------------------------
 
@@ -150,6 +152,39 @@ class FileContext:
         text = self.lines[line - 1] if 0 < line <= len(self.lines) else ""
         prefix = text.encode("utf-8")[:byte_offset].decode("utf-8", errors="replace")
         return len(prefix) + 1
+
+    @property
+    def masked_lines(self) -> list[str]:
+        """`lines` with string literals assigned to secret-looking names masked (same
+        lines and character columns); what reports and the LLM get to see."""
+        if self._masked is None:
+            from hackscan.core.redact import mask_secret_literals
+
+            self._masked = _NEWLINE_RE.split(mask_secret_literals(self.source, self.tree))
+        return self._masked
+
+    def masked_segment(self, node: ast.AST) -> str:
+        return self._slice(self.masked_lines, node)
+
+    def has_secret_literal(self, node: ast.AST) -> bool:
+        """Whether `node`'s source contains a masked secret literal: then no fix is made,
+        since a fix must carry the real code."""
+        return self._slice(self.masked_lines, node) != self._slice(self.lines, node)
+
+    def _slice(self, lines: list[str], node: ast.AST) -> str:
+        start, end = node.lineno, node.end_lineno or node.lineno
+        first = self.char_column(start, node.col_offset) - 1
+        last = (
+            self.char_column(end, node.end_col_offset) - 1
+            if node.end_col_offset is not None
+            else None
+        )
+        chunk = lines[start - 1 : end]
+        if not chunk:
+            return ""
+        if len(chunk) == 1:
+            return chunk[0][first:last]
+        return "\n".join([chunk[0][first:], *chunk[1:-1], chunk[-1][:last]])
 
 
 # -- expression classification helpers (shared by rules) ----------------------------------
