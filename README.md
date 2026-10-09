@@ -51,7 +51,7 @@ hackscan rules                                    # list rules
 | Option | Meaning |
 |---|---|
 | `--severity`, `--min-confidence` | Report filters. |
-| `--fail-on SEV` | Exit 1 if an open (candidate/confirmed) finding is at least `SEV`. Suppressed findings never count. |
+| `--fail-on SEV` | Exit 1 if an open (candidate/confirmed) finding is at least `SEV`. Suppressed findings never count. `never` turns off a threshold set in `.hackscan.yml`. |
 | `--ignore GLOB` | Skip paths (`tests/*`, `**/migrations/**`, `legacy`). `.venv`, `node_modules`, `build`, ... are always skipped. |
 | `--with TOOLS` / `--import FMT=FILE` | Run external tools / import reports (`sarif`, `semgrep`, `bandit`, `codeql`, `gitleaks`). A missing or failing tool is a warning unless `--strict-tools`. |
 | `-o FILE` | Write the report to `FILE`. Never overwrites anything except a previous HackScan report. |
@@ -161,6 +161,39 @@ class PickleLoads(RulePlugin):
 
 ## GitHub Actions
 
+The repository is a composite action (available from v0.3.0). It installs HackScan, writes
+SARIF, uploads it to GitHub Code Scanning and then fails the job if the `fail-on` threshold
+was hit, so findings appear in the Security tab even on a failing run.
+
+```yaml
+permissions:
+  contents: read
+  security-events: write   # needed for the Code Scanning upload
+  actions: read            # needed for the upload in private repositories
+
+jobs:
+  hackscan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: kahledawad2019-netizen/hackscan@v0.3.0
+        with:
+          path: src
+          fail-on: high
+```
+
+| Input | Default | Meaning |
+|---|---|---|
+| `path` | `.` | File or directory to scan |
+| `version` | *(empty)* | HackScan version from PyPI; empty installs the action's own checkout |
+| `fail-on` | `high` | Fail at this severity or above; empty passes `--fail-on never` (HackScan 0.3.0+), so findings never fail the job but crashes and errors still do |
+| `args` | *(empty)* | Extra CLI arguments, word-split without globbing; pass only trusted values |
+| `sarif-file` | `hackscan.sarif` | Report path |
+| `upload-sarif` | `true` | Upload to Code Scanning (skip it for fork pull requests, whose token is read-only) |
+
+Outputs: `sarif-file` and `exit-code` (0, 1 = threshold hit, 2 = error). The action sets up
+Python 3.12 on the runner. Without the action:
+
 ```yaml
 - run: pipx install hackscan
 - run: hackscan scan . --format sarif --sarif-omit-suppressed -o hackscan.sarif --fail-on high
@@ -169,6 +202,20 @@ class PickleLoads(RulePlugin):
   with:
     sarif_file: hackscan.sarif
 ```
+
+## pre-commit
+
+```yaml
+repos:
+  - repo: https://github.com/kahledawad2019-netizen/hackscan
+    rev: v0.3.0
+    hooks:
+      - id: hackscan
+```
+
+The hook runs `hackscan scan . --fail-on high` once per commit that touches Python files. It
+scans the whole repository (the CLI takes a single path), so `.hackscan.yml` `ignore` globs
+apply as usual.
 
 ## Limitations
 

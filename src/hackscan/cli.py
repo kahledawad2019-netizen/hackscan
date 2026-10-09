@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import click
@@ -43,8 +44,8 @@ def main() -> None:
 @click.option("--min-confidence", type=click.IntRange(0, 100), help="Minimum confidence.")
 @click.option(
     "--fail-on",
-    type=click.Choice(SEVERITIES),
-    help="Exit 1 if an open finding is at least this severe.",
+    type=click.Choice([*SEVERITIES, "never"]),
+    help="Exit 1 if an open finding is at least this severe ('never' overrides the config).",
 )
 @click.option("--ignore", multiple=True, help="Glob of paths to skip (repeatable).")
 @click.option("--show-suppressed", is_flag=True, default=None, help="Include suppressed findings.")
@@ -129,7 +130,9 @@ def scan_command(
     try:
         config = load(path, config_path).with_overrides(
             severity=Severity(options["severity"]) if options["severity"] else None,
-            fail_on=Severity(options["fail_on"]) if options["fail_on"] else None,
+            fail_on=Severity(options["fail_on"])
+            if options["fail_on"] not in (None, "never")
+            else None,
             min_confidence=options["min_confidence"],
             ignore=tuple(options["ignore"]) or None,
             show_suppressed=options["show_suppressed"],
@@ -149,6 +152,8 @@ def scan_command(
             with_tools=parse_tools(with_tools, click.BadParameter) if with_tools else None,
             imports=_parse_imports(imports) if imports else None,
         )
+        if options["fail_on"] == "never":
+            config = replace(config, fail_on=None)
         console = _rich_console(color) if fmt == "text" and output is None and not quiet else None
         if console is not None:
             from hackscan.ui.render import banner

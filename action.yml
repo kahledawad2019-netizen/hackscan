@@ -1,0 +1,94 @@
+name: HackScan
+description: Scan Python code and upload SARIF to GitHub Code Scanning.
+
+inputs:
+  path:
+    description: File or directory to scan.
+    required: false
+    default: "."
+  version:
+    description: HackScan version to install; empty installs this action's checkout.
+    required: false
+    default: ""
+  fail-on:
+    description: Fail at this severity or above; empty never fails on findings (HackScan >= 0.3.0).
+    required: false
+    default: "high"
+  args:
+    description: Extra CLI arguments, split by the shell; must be trusted.
+    required: false
+    default: ""
+  sarif-file:
+    description: SARIF output path.
+    required: false
+    default: "hackscan.sarif"
+  upload-sarif:
+    description: Upload SARIF to GitHub Code Scanning when true.
+    required: false
+    default: "true"
+
+outputs:
+  sarif-file:
+    description: SARIF output path.
+    value: ${{ steps.scan.outputs.sarif-file }}
+  exit-code:
+    description: Scan exit code (0 OK, 1 threshold hit, 2 scan error).
+    value: ${{ steps.scan.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install HackScan
+      shell: bash
+      env:
+        HACKSCAN_VERSION: ${{ inputs.version }}
+        HACKSCAN_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        if [[ -n "$HACKSCAN_VERSION" ]]; then
+          python -m pip install "hackscan==$HACKSCAN_VERSION"
+        else
+          python -m pip install "$HACKSCAN_ACTION_PATH"
+        fi
+    - name: Scan
+      id: scan
+      shell: bash
+      env:
+        HACKSCAN_PATH: ${{ inputs.path }}
+        HACKSCAN_FAIL_ON: ${{ inputs.fail-on }}
+        HACKSCAN_ARGS: ${{ inputs.args }}
+        HACKSCAN_SARIF_FILE: ${{ inputs.sarif-file }}
+      run: |
+        # An empty input disables even a threshold inherited from .hackscan.yml; the exit code
+        # is never rewritten, so a crash (Python exits 1) still fails the job.
+        threshold=(--fail-on never)
+        if [[ -n "$HACKSCAN_FAIL_ON" ]]; then
+          threshold=(--fail-on "$HACKSCAN_FAIL_ON")
+        fi
+        # Extra args intentionally undergo word splitting (globbing is off); supply only trusted values.
+        set -f
+        rm -f -- "$HACKSCAN_SARIF_FILE"
+        code=0
+        hackscan scan "$HACKSCAN_PATH" --format sarif --sarif-omit-suppressed \
+          -o "$HACKSCAN_SARIF_FILE" $HACKSCAN_ARGS "${threshold[@]}" || code=$?
+        written=false
+        if [[ -s "$HACKSCAN_SARIF_FILE" ]]; then
+          written=true
+        fi
+        printf 'sarif-file=%s\n' "$HACKSCAN_SARIF_FILE" >> "$GITHUB_OUTPUT"
+        printf 'sarif-written=%s\n' "$written" >> "$GITHUB_OUTPUT"
+        printf 'exit-code=%s\n' "$code" >> "$GITHUB_OUTPUT"
+    - name: Upload SARIF
+      if: ${{ always() && inputs.upload-sarif == 'true' && steps.scan.outputs.sarif-written == 'true' }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.sarif-file }}
+        category: hackscan
+    - name: Apply scan result
+      if: ${{ always() && steps.scan.outputs.exit-code != '' }}
+      shell: bash
+      env:
+        HACKSCAN_EXIT_CODE: ${{ steps.scan.outputs.exit-code }}
+      run: exit "$HACKSCAN_EXIT_CODE"

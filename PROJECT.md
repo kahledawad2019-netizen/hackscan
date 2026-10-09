@@ -130,7 +130,7 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 | 15 | Rich "Matrix" TUI (banner, spinners, tables); auto-off in CI / `--quiet` | M4 |
 | 16 | Inter-procedural & cross-file taint (own call graph from `ast`) | M5 |
 | 17 | Benchmark harness vs Bandit / Semgrep CE / CodeQL; published precision/recall | M5 |
-| 18 | GitHub Action (uploads SARIF to Code Scanning), pre-commit hook | M5 |
+| 18 | GitHub Action (uploads SARIF to Code Scanning), pre-commit hook | M5 ✅ |
 | 19 | Auth bypass / IDOR heuristics (only if benchmark shows acceptable precision) | Later |
 | 20 | Docker image | Later, on demand |
 
@@ -142,7 +142,7 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 | M2 ✅ | Taint | Framework fixtures (Flask/Django/FastAPI); constant/sanitized flows suppressed; tests for taint boundaries | M1 |
 | M3 ✅ | CLI, SARIF, importers → **v0.1.0 on PyPI** (released 2026-10-08) | `pip install hackscan` works on clean venv; SARIF validates against official schema; `--fail-on` exit codes tested | M2 |
 | M4 ✅ | LLM + remediation + TUI → **v0.2.0** (2026-10-09; 14 Codex gate rounds, double-OK) | All LLM tests run against a mocked Ollama; offline degradation tested; prompt-injection fixture | M3 |
-| M5 | Inter-procedural taint, benchmark, GitHub Action → v0.3.0 | Benchmark report in README; Action used on the repo itself | M4 |
+| M5 🚧 (Action + pre-commit done) | Inter-procedural taint, benchmark, GitHub Action → v0.3.0 | Benchmark report in README; Action used on the repo itself | M4 |
 
 ## Test Strategy
 - Corpus: `tests/corpus/<rule>/{vulnerable,safe}/*.py`, each file annotated with expected findings
@@ -358,3 +358,12 @@ hackscan/
   redacting finding function names before IDs, output and triage. Double-quoted SQL
   identifiers and SQL text containing `$` also receive no fix. Numeric and concatenated
   secret literals are masked and collected.
+- 2026-10-09 (M5 step 1): Roles back to Claude implements, Codex reviews (double OK before
+  commit). Repo root is a composite GitHub Action: inputs reach `run:` scripts only via env,
+  extra `args` are word-split with globbing off, the scan step records the exit code so SARIF
+  is uploaded (only if written) before the job fails; the dogfood workflow skips upload on
+  fork PRs. pre-commit hook scans the whole repo (`pass_filenames: false`; CLI takes one path).
+  Review round 1 (Codex Not OK, fixed): an empty `fail-on` input now passes the new
+  `--fail-on never` (overrides `.hackscan.yml`) instead of rewriting exit 1 to 0, which hid
+  crashes; a plugin constructor exception is now a PluginError (exit 2, not 1); README adds
+  `actions: read` for private repositories.

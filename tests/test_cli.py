@@ -200,6 +200,45 @@ def test_plugins_option(tmp_path: Path):
     assert [f["rule_id"] for f in json.loads(out)["findings"]] == ["ACME-1"]
 
 
+def test_plugin_constructor_error_exits_2_not_1(tmp_path: Path):
+    plugins = tmp_path / "plugins"
+    plugins.mkdir()
+    (plugins / "p.py").write_text(
+        textwrap.dedent(
+            """
+            from hackscan.core.models import Severity
+            from hackscan.plugins import RulePlugin
+
+            class Broken(RulePlugin):
+                rule_id = "ACME-2"
+                name = "broken"
+                description = "broken"
+                severity = Severity.HIGH
+                cwe = ("CWE-502",)
+
+                def __init__(self):
+                    raise RuntimeError("boom")
+
+                def check(self, node, ctx):
+                    yield from ()
+            """
+        )
+    )
+    (tmp_path / "a.py").write_text("x = 1\n")
+    result = run("scan", str(tmp_path), "--plugins", str(plugins))
+    assert result.exit_code == 2
+    assert "error creating plugin p.py: boom" in result.output
+
+
+@pytest.mark.parametrize(("config", "expected"), [("fail-on: low\n", 0), ("", 0)])
+def test_fail_on_never_overrides_config(tmp_path: Path, config: str, expected: int):
+    shutil.copytree(CORPUS / "sqli", tmp_path / "code")
+    (tmp_path / ".hackscan.yml").write_text(config)
+    assert run("scan", str(tmp_path / "code"), "--fail-on", "never").exit_code == expected
+    if config:
+        assert run("scan", str(tmp_path / "code")).exit_code == 1
+
+
 def test_parallel_and_serial_scans_agree():
     serial = json.loads(run("scan", str(CORPUS), "--format", "json", "--jobs", "1").output)
     parallel = json.loads(run("scan", str(CORPUS), "--format", "json", "--jobs", "2").output)

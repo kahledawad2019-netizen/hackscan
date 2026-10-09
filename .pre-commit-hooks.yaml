@@ -1,0 +1,9 @@
+- id: hackscan
+  name: HackScan
+  description: Scan the repository for Python security findings.
+  language: python
+  entry: hackscan scan
+  args: [".", "--fail-on", "high"]
+  pass_filenames: false
+  types: [python]
+  require_serial: true

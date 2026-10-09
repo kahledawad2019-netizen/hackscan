@@ -59,7 +59,11 @@ def load_plugins(directory: Path) -> list[RulePlugin]:
                 and obj.__module__ == module_name
                 and not inspect.isabstract(obj)
             ):
-                plugins.append(_validated(obj(), path))
+                try:
+                    plugin = obj()
+                except Exception as exc:  # a crash must not look like findings (exit 1)
+                    raise PluginError(f"error creating plugin {path.name}: {exc}") from exc
+                plugins.append(_validated(plugin, path))
     return plugins
 
 
