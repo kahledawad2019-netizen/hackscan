@@ -10,8 +10,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from hackscan.analyzers.interproc import FileFacts
 from hackscan.analyzers.suppressions import apply_inline_suppressions
-from hackscan.analyzers.taint_pass import apply_taint
+from hackscan.analyzers.taint_pass import analyze_taint
 from hackscan.core.models import OWN_SOURCE, Evidence, Finding, Region
 from hackscan.core.redact import file_secret_literal_values, secret_literal_values
 from hackscan.core.taxonomy import classify
@@ -27,10 +28,16 @@ class FileResult:
     errors: list[str] = field(default_factory=list)
     secrets: set[str] = field(default_factory=set)
     file_secrets: set[str] = field(default_factory=set)
+    facts: FileFacts | None = None  # inter-procedural facts (pass 2b)
 
 
 def analyze_source(
-    source: str, rel_path: str, plugins: Sequence[RulePlugin], *, taint: bool = True
+    source: str,
+    rel_path: str,
+    plugins: Sequence[RulePlugin],
+    *,
+    taint: bool = True,
+    link: bool = False,
 ) -> FileResult:
     """Parse `source`, run every plugin (pass 1), then taint (pass 2) and inline
     suppressions. Parse and plugin errors are reported, not raised."""
@@ -72,7 +79,7 @@ def analyze_source(
     findings = [f for f, _ in candidates]
     if taint:
         try:
-            findings = apply_taint(ctx, candidates)
+            findings, result.facts = analyze_taint(ctx, candidates, link=link)
         except RecursionError:  # pathological nesting: keep pass-1 candidates
             result.errors.append(f"{rel_path}: taint analysis skipped (nesting too deep)")
     findings = apply_inline_suppressions(findings, ctx)
@@ -81,7 +88,12 @@ def analyze_source(
 
 
 def analyze_file(
-    path: Path, root: Path, plugins: Sequence[RulePlugin], *, taint: bool = True
+    path: Path,
+    root: Path,
+    plugins: Sequence[RulePlugin],
+    *,
+    taint: bool = True,
+    link: bool = False,
 ) -> FileResult:
     rel_path = path.relative_to(root).as_posix()
     try:
@@ -91,7 +103,7 @@ def analyze_file(
         source = data.decode(encoding)
     except (OSError, SyntaxError, UnicodeDecodeError, LookupError) as exc:
         return FileResult(path=rel_path, errors=[f"{rel_path}: cannot read: {exc}"])
-    return analyze_source(source, rel_path, plugins, taint=taint)
+    return analyze_source(source, rel_path, plugins, taint=taint, link=link)
 
 
 def _to_finding(

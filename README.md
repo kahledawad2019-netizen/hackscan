@@ -20,6 +20,7 @@ HIGH     confirmed  views.py:10:9  HS-SQLI-001  [100%]
 |---|---|
 | **Verdicts, not just matches** | Every injection candidate is **confirmed** (untrusted source reaches it, with a trace), **suppressed** (provably constant or sanitized on every path), or left as a **candidate** for review. |
 | **Sound suppression** | A finding is only dismissed if *every* path is safe. Branches, loops (`break`/`continue`), `try`/`except`/`finally`, aliasing and mutation of lists/dicts, closures and `:=` are modeled. A differential fuzzer executes thousands of random programs to check that no dismissed sink ever receives attacker input. |
+| **Across functions and files** | A sink fed by a function parameter is confirmed when a caller anywhere in the scanned code passes untrusted data (directly or through other functions), or when a called function returns it; the trace names the source file and line. |
 | **Framework-aware** | Sources: Flask `request.*`, Django/DRF/Starlette/FastAPI request objects (incl. `self.request`), route-handler parameters, `input()`, `sys.argv`. |
 | **One report from many tools** | Imports Semgrep, Bandit, CodeQL (SARIF) and Gitleaks; deduplicates by vulnerability class and location, keeping every tool as provenance. |
 | **Fixes you can apply** | Mechanical, validated fix suggestions: parameterized queries (driver-aware placeholders), argument lists instead of shell strings, `ast.literal_eval`, SHA-256. Each is an exact edit that re-parses; ambiguous cases get no fix rather than a wrong one. |
@@ -219,8 +220,29 @@ apply as usual.
 
 ## Limitations
 
-- Taint analysis is intra-procedural: values arriving through function parameters are
-  candidates, not confirmations (inter-procedural analysis is on the roadmap).
+- Taint analysis follows calls across functions and files only to *confirm* findings: a
+  sink fed by a parameter is confirmed when some caller in the scanned code passes
+  untrusted data, or when a called function returns it. It never suppresses a finding
+  (callers outside the scan are unknown). Only undecorated module-level functions bound
+  once are linked (same module, `import`/`from ... import`, relative imports and
+  re-exports); methods, nested functions, decorated functions, modules with a star
+  import, `*args`/`**kwargs` call sites and module names that match more than one file
+  are not followed. Sources are not tracked through object attributes or globals. The
+  result of a call is assumed to carry its arguments, so a helper that sanitizes them
+  (`def clean(x): return int(x)`) does not prevent a confirmation.
+- Findings in a function (or module) that itself uses `:=` are never suppressed, only
+  confirmed or left as candidates: an assignment expression can rebind a name in the
+  middle of an expression, which the statement-level analysis does not order. Sinks in
+  the body of a generator expression are never suppressed either (it runs later), nor
+  are values produced by one. Module-level constants are trusted only when bound exactly
+  once and the module never writes its namespace dynamically (`globals()`, `vars()`,
+  `exec`, `eval`, `__dict__`, star imports); `global`/`nonlocal` names are never trusted.
+- Mutable objects (lists, dicts, sets) are tracked by variable name. Mutation through
+  direct aliases, method calls (`d.get(k).append(x)`), bound methods
+  (`add = parts.append`), conditional receivers and comprehension items is modeled;
+  aliases created in less direct ways (stored in another object's attribute or in a
+  container and mutated through it later, returned from a helper, reached through
+  `getattr`) may be missed, so a constant suppression involving such code deserves review.
 - Python only. Imported tools may cover other languages; their findings are passed through.
 - Fix suggestions are deliberately conservative: many vulnerable lines get none. Command
   fixes (argument lists) are only offered for programs whose arguments are inert data

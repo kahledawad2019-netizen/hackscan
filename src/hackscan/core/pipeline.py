@@ -1,4 +1,5 @@
-"""Scan pipeline: discover -> analyze (passes 1-2, parallel) -> import -> merge -> ids.
+"""Scan pipeline: discover -> analyze (passes 1-2, parallel) -> link (pass 2b) -> import ->
+merge -> ids.
 
 Pipeline order per PROJECT.md: collect (own engine + importers) -> `merge_findings` ->
 `assign_ids`. Output is deterministic regardless of worker scheduling.
@@ -15,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from hackscan.analyzers.ast_pass import FileResult, analyze_file, analyze_source
+from hackscan.analyzers.interproc import confirm_findings
 from hackscan.analyzers.llm_pass import LLMConfig, default_cache_dir, triage
 from hackscan.analyzers.remediate import generate_fixes
 from hackscan.config import DEFAULT_IGNORES, HackScanConfig
@@ -62,6 +64,8 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
         errors.extend(result.errors)
         known_secrets.update(result.secrets)
         file_secrets.setdefault(result.path, set()).update(result.file_secrets)
+    if config.taint:
+        findings = confirm_findings(findings, [r.facts for r in results if r.facts is not None])
 
     index = SourceIndex(root)
     external = collect(
@@ -203,9 +207,8 @@ def _worker_init(plugins_dir: str | None, taint: bool) -> None:
 
 def _worker_analyze(args: tuple[str, str]) -> FileResult:
     path, root = args
-    return analyze_file(
-        Path(path), Path(root), _WORKER_STATE["plugins"], taint=_WORKER_STATE["taint"]
-    )
+    taint = _WORKER_STATE["taint"]
+    return analyze_file(Path(path), Path(root), _WORKER_STATE["plugins"], taint=taint, link=taint)
 
 
 def _analyze(
@@ -213,7 +216,9 @@ def _analyze(
 ) -> list[FileResult]:
     jobs = config.jobs or min(8, os.cpu_count() or 1)
     if jobs <= 1 or len(files) < PARALLEL_THRESHOLD:
-        return [analyze_file(f, root, plugins, taint=config.taint) for f in files]
+        return [
+            analyze_file(f, root, plugins, taint=config.taint, link=config.taint) for f in files
+        ]
     plugins_dir = str(config.plugins) if config.plugins else None
     with ProcessPoolExecutor(
         max_workers=jobs, initializer=_worker_init, initargs=(plugins_dir, config.taint)

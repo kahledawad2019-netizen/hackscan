@@ -1081,3 +1081,18 @@ def test_verified_evidence_quotes_masked_source(tmp_path):
     out = _apply(f, answer("false_positive", line=4, kind="constant"), ctx, LLMConfig(), None)
     assert out.status is Status.SUPPRESSED
     assert "tok-evidence-secret" not in json.dumps(out.to_dict())
+
+
+@pytest.mark.parametrize(
+    ("body", "params"),
+    [
+        # a global: any call between the guard and the sink may rebind it
+        ('    if cmd not in {"ls"}:\n        return\n', "flag=False"),
+        ('    global cmd\n    if cmd not in {"ls"}:\n        return\n', "flag=False"),
+    ],
+)
+def test_guard_evidence_requires_a_local(tmp_path, body, params):
+    line = 4 if body.startswith("    if") else 5
+    assert not evidence_ok(tmp_path, body, line, "guard", params=params)
+    # the same guard on a parameter is accepted
+    assert evidence_ok(tmp_path, '    if cmd not in {"ls"}:\n        return\n', 4, "guard")

@@ -128,7 +128,7 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 | 13 | Ollama triage pass with graceful offline fallback | M4 |
 | 14 | Template + LLM remediation as validated edits; diff view | M4 |
 | 15 | Rich "Matrix" TUI (banner, spinners, tables); auto-off in CI / `--quiet` | M4 |
-| 16 | Inter-procedural & cross-file taint (own call graph from `ast`) | M5 |
+| 16 | Inter-procedural & cross-file taint (own call graph from `ast`) | M5 ✅ |
 | 17 | Benchmark harness vs Bandit / Semgrep CE / CodeQL; published precision/recall | M5 |
 | 18 | GitHub Action (uploads SARIF to Code Scanning), pre-commit hook | M5 ✅ |
 | 19 | Auth bypass / IDOR heuristics (only if benchmark shows acceptable precision) | Later |
@@ -142,7 +142,7 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
 | M2 ✅ | Taint | Framework fixtures (Flask/Django/FastAPI); constant/sanitized flows suppressed; tests for taint boundaries | M1 |
 | M3 ✅ | CLI, SARIF, importers → **v0.1.0 on PyPI** (released 2026-10-08) | `pip install hackscan` works on clean venv; SARIF validates against official schema; `--fail-on` exit codes tested | M2 |
 | M4 ✅ | LLM + remediation + TUI → **v0.2.0** (2026-10-09; 14 Codex gate rounds, double-OK) | All LLM tests run against a mocked Ollama; offline degradation tested; prompt-injection fixture | M3 |
-| M5 🚧 (Action + pre-commit done) | Inter-procedural taint, benchmark, GitHub Action → v0.3.0 | Benchmark report in README; Action used on the repo itself | M4 |
+| M5 🚧 (Action, pre-commit, cross-file taint done) | Inter-procedural taint, benchmark, GitHub Action → v0.3.0 | Benchmark report in README; Action used on the repo itself | M4 |
 
 ## Test Strategy
 - Corpus: `tests/corpus/<rule>/{vulnerable,safe}/*.py`, each file annotated with expected findings
@@ -367,3 +367,72 @@ hackscan/
   `--fail-on never` (overrides `.hackscan.yml`) instead of rewriting exit 1 to 0, which hid
   crashes; a plugin constructor exception is now a PluginError (exit 2, not 1); README adds
   `actions: read` for private repositories.
+- 2026-10-09 (M5 step 2): Inter-procedural, cross-file taint is confirmation-only
+  (`analyzers/interproc.py`). Pass 2 records symbolic facts per file: parameter and
+  call-result atoms carried in `Taint.symbols` with per-atom sanitized classes, return
+  summaries of linkable functions, argument values at statically named call sites. The
+  pipeline links all files (same module, imports, relative imports, re-exports, src
+  layouts by unambiguous module-name suffix) and solves a least fixpoint; candidates
+  reached by an untrusted source become confirmed with a file:line trace. Never
+  suppresses: unknown callers may exist. Only undecorated, non-generator module-level
+  functions bound once are linked; methods, `*args` positions and star-import modules are
+  not. Cost: taint now runs on every file (~45 ms/file serial on site-packages, +50%);
+  `_closure_names` made single-pass.
+  Review round 1 (Codex OK, 3 non-blocking precision issues): `match` captures
+  (`MatchAs`/`MatchStar`/`MatchMapping.rest`) are now scope bindings; the module binding
+  census also counts walrus targets in keyword-only defaults, lambda defaults,
+  annotations and class bases. Call results carrying their arguments through a
+  sanitizing helper stay a documented limitation (same approximation as within a function).
+  Review round 2 (Codex Not OK, pre-existing pass-2 soundness bug, fixed): a `match`
+  mapping rest capture (`case {**rest}`) now takes the subject's taint, and captures of
+  a failed pattern or a false guard stay visible to later cases and after the `match`
+  (the no-match path joins them), so a reachable sink is no longer suppressed as constant.
+  Review round 3 (Codex Not OK, pre-existing pass-2 soundness bugs, fixed): a `:=` in a
+  part that may not run (later `and`/`or` operands, `x if c else y` branches,
+  comprehension bodies, also inside `match` guards) is applied on a copy and joined
+  instead of overwriting the current value (comprehension bodies iterate to a fixpoint);
+  a `match` capture is aliased with the mutable names in the subject.
+  Review round 4 (Codex Not OK, 6 blockers: 5 pre-existing, 1 regression from round 3's
+  comprehension rework, which was reverted): instead of ordering every `:=` effect, a scope
+  whose own code contains `:=` never suppresses its sinks (confirmation still works); a
+  module with `:=` gets no trusted module constants; sinks in a generator expression's
+  body (deferred execution) are never suppressed. Also fixed (pre-existing): a nested
+  function or lambda reading an enclosing local that shadows a module constant was
+  treated as constant; module constants now apply only if the name resolves to the module.
+  Review round 5 (Codex Not OK, 6 pre-existing blockers without `:=`, fixed with
+  conservative rules): generator expressions yield UNKNOWN-joined values; a comprehension
+  target shadows outer bindings and class-body names are hidden inside class
+  comprehensions; module constants require exactly one module-level binding and no
+  dynamic namespace writes (`globals`/`vars`/`locals`/`exec`/`eval`/`__import__`,
+  `__dict__`/`__globals__`/`modules`, star imports), and module-level sinks in such a
+  module are never suppressed; names a function declares `global`/`nonlocal` are joined
+  with UNKNOWN on every read; LLM guard evidence must cover the function's own locals.
+  Review round 6 (Codex Not OK, 3 blockers, fixed): namespace writers are also detected
+  as attributes (`builtins.exec`, `import_module(...).exec`), imported aliases
+  (`from builtins import exec as run`), `import builtins` and `__builtins__`; a class body
+  that may write its own namespace (`locals()[...]` etc. in that body) never suppresses;
+  a comprehension target bound by more than one `for` resolves to UNKNOWN.
+  Review round 7 (Codex Not OK, 4 blockers, fixed): namespace-writer aliases bound by
+  assignment are followed file-wide (`execute = exec` then used in a class body), and
+  importing a namespace attribute under any name counts (`_Namespace`, computed once per
+  file); eager comprehensions scan filters before the element and repeat their body to a
+  fixpoint (mutations of one item reach the next; widened to UNKNOWN on budget
+  exhaustion); comprehension targets are aliased with the mutable names in their
+  iterables. Serial scan of ~770 site-packages files: 22.8 s (v0.2.0) -> ~41 s.
+  Review round 8 (Codex Not OK, 3 blockers, fixed): `:=` creates writer aliases too; a
+  comprehension that may mutate one of its items (non-read-only method on a target,
+  target passed to a call other than a sink/sanitizer/pure builtin/string method, store
+  into a target) invalidates every mutable name in its iterables and resolves its targets
+  to UNKNOWN; subscript/attribute comprehension targets store into their base.
+  Review round 9 (Codex Not OK, 2 blockers, fixed): a comprehension target anywhere inside
+  a call argument counts as escaping (`change([cmd])`); mutations, stores and comprehension
+  targets find their container through method calls too (`_root_name`: `d.get(k).append(x)`
+  and `d.setdefault(k, [])[0] = x` mutate `d`), in all code, not only comprehensions.
+  Review round 10 (Codex Not OK, 2 blockers, fixed): a bound method taken off a mutable
+  object (`append = parts.append`, method attribute loaded but not called right away)
+  invalidates every mutable name in its receiver; a mutating method call updates every
+  mutable name in a compound receiver (`(a if c else b).append(x)`, `[cmd][0].append(x)`).
+  User decision (2026-10-09, after 10 rounds): fix round 10, document remaining indirect
+  mutable aliasing (aliases stored in attributes/containers, returned from helpers,
+  `getattr`) as a README limitation, confirm with Codex once, commit with both OKs; any
+  further pass-2 aliasing hardening is a separate task.

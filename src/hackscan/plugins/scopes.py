@@ -320,8 +320,10 @@ class ScopeIndex:
         elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             if id(node) not in self._walrus_targets:
                 self._bind_store(scope, node.id)
-        elif isinstance(node, ast.ExceptHandler) and node.name:
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
             self._bind_store(scope, node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            self._bind_store(scope, node.rest)
 
     def _owner(self, scope: Scope, name: str) -> Scope:
         """Scope that actually receives a binding of `name` made in `scope`."""

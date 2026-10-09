@@ -25,6 +25,19 @@ import ast
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 
+from hackscan.analyzers.interproc import (
+    CallSite,
+    FileFacts,
+    Flow,
+    FunctionFacts,
+    SymbolPair,
+    finding_key,
+    linkable_functions,
+    module_name,
+    module_symbols,
+    outer_parts,
+    parameters,
+)
 from hackscan.core.models import Evidence, Finding, Status
 from hackscan.core.taxonomy import CMDI, TAINT_CLASSES
 from hackscan.plugins.base import FileContext, Match
@@ -134,6 +147,10 @@ class Taint:
     shell_plain: bool = True
     # Command-injection safety relies on a quoting sanitizer (context-sensitive).
     quote_sanitized: bool = False
+    # Symbolic parts for inter-procedural linking (see `interproc`): parameters and call
+    # results this value may come from, each with the classes it was sanitized for.
+    # They never affect the verdict of this pass.
+    symbols: frozenset[SymbolPair] = frozenset()
 
     @property
     def is_constant(self) -> bool:
@@ -147,19 +164,38 @@ UNKNOWN = Taint(unknown=True, safe_for=frozenset(), mutable=True, shell_plain=Fa
 def combine(values: Iterable[Taint]) -> Taint:
     """Value derived from all of `values` (also the join of alternative paths)."""
     sources: set[Source] = set()
+    symbols: set[SymbolPair] = set()
     unknown = mutable = quote_sanitized = False
     shell_plain = True
     safe = set(TAINT_CLASSES)
     for v in values:
         sources |= v.sources
+        symbols |= v.symbols
         unknown = unknown or v.unknown
         safe &= v.safe_for
         mutable = mutable or v.mutable
         shell_plain = shell_plain and v.shell_plain
         quote_sanitized = quote_sanitized or v.quote_sanitized
     return Taint(
-        frozenset(sources), unknown, frozenset(safe), mutable, shell_plain, quote_sanitized
+        frozenset(sources),
+        unknown,
+        frozenset(safe),
+        mutable,
+        shell_plain,
+        quote_sanitized,
+        frozenset(symbols),
     )
+
+
+def _unsafe_symbols(value: Taint, classes: frozenset[str]) -> Taint:
+    """Drop `classes` from what the symbolic parts count as sanitized for."""
+    if not value.symbols:
+        return value
+    return replace(value, symbols=frozenset((a, s - classes) for a, s in value.symbols))
+
+
+def _with_symbol(value: Taint, atom: tuple) -> Taint:
+    return replace(value, symbols=value.symbols | {(atom, frozenset())})
 
 
 def concat(values: list[Taint]) -> Taint:
@@ -172,6 +208,7 @@ def concat(values: list[Taint]) -> Taint:
     result = combine(values)
     if not result.shell_plain and any(v.quote_sanitized for v in values):
         result = replace(result, safe_for=result.safe_for - {CMDI})
+        result = _unsafe_symbols(result, frozenset({CMDI}))
     return replace(result, mutable=False)
 
 
@@ -180,6 +217,7 @@ def unquote(value: Taint) -> Taint:
     break the quoting, so quoting-based safety does not survive it."""
     if not value.quote_sanitized:
         return value
+    value = _unsafe_symbols(value, frozenset({CMDI}))
     return replace(value, safe_for=value.safe_for - {CMDI}, quote_sanitized=False)
 
 
@@ -217,16 +255,44 @@ def join_env(a: Env | None, b: Env | None) -> Env | None:
 
 def apply_taint(ctx: FileContext, candidates: list[tuple[Finding, Match]]) -> list[Finding]:
     """Return findings updated with taint results (same order; never drops any)."""
+    return analyze_taint(ctx, candidates, link=False)[0]
+
+
+def analyze_taint(
+    ctx: FileContext, candidates: list[tuple[Finding, Match]], *, link: bool = True
+) -> tuple[list[Finding], FileFacts | None]:
+    """Like `apply_taint`; with `link`, also return this file's inter-procedural facts."""
     targets = {
         id(m.node): m
         for f, m in candidates
         if f.vuln_class in TAINT_CLASSES and m.arg is not None and f.status is Status.CANDIDATE
     }
-    if not targets:
-        return [f for f, _ in candidates]
-    engine = _FileEngine(ctx, targets)
+    if not targets and not link:
+        return [f for f, _ in candidates], None
+    facts = FileFacts(ctx.path, module_name(ctx.path)) if link else None
+    engine = _FileEngine(ctx, targets, facts)
     results = engine.run()
-    return [_decide(f, results.get(id(m.node))) for f, m in candidates]
+    findings = []
+    for f, m in candidates:
+        taint = results.get(id(m.node))
+        decided = _decide(f, taint)
+        if (
+            facts is not None
+            and taint is not None
+            and taint.symbols
+            and decided.status is Status.CANDIDATE
+        ):
+            facts.sinks[finding_key(decided)] = _flow(ctx, taint)
+        findings.append(decided)
+    return findings, facts
+
+
+def _flow(ctx: FileContext, value: Taint) -> Flow:
+    return Flow(
+        frozenset((ctx.path, s.line, s.description) for s in value.sources),
+        value.safe_for,
+        value.symbols,
+    )
 
 
 def _decide(finding: Finding, taint: Taint | None) -> Finding:
@@ -301,16 +367,30 @@ def _decide(finding: Finding, taint: Taint | None) -> Finding:
 
 
 class _FileEngine:
-    def __init__(self, ctx: FileContext, targets: dict[int, Match]) -> None:
+    def __init__(
+        self, ctx: FileContext, targets: dict[int, Match], facts: FileFacts | None = None
+    ) -> None:
         self.ctx = ctx
         self.targets = targets
         self.results: dict[int, Taint] = {}
         self.module_constants: frozenset[str] = frozenset()
+        self.facts = facts
+        # `globals()`, `exec`, `__dict__`...: module names may change behind our back.
+        self.namespace = _Namespace(ctx.tree)
+        self.namespace_exposed = self.namespace.module
+        self.linked: dict[int, str] = {}  # id(def) -> name, for linkable functions
+        self._call_targets: dict[int, str | None] = {}
+        self._sites: dict[tuple[int, int], tuple[str, int, list[Taint], dict[str, Taint]]] = {}
+        if facts is not None:
+            facts.symbols = module_symbols(ctx.tree, ctx.path)
+            for func in linkable_functions(ctx.tree, facts.symbols):
+                self.linked[id(func)] = func.name  # type: ignore[attr-defined]
 
     def run(self) -> dict[int, Taint]:
         module = _FunctionEngine(self, self.ctx.tree, request_params=frozenset())
         module_env = module.run({})
-        self.module_constants = self._constant_globals(module_env or {})
+        if not module.has_walrus:  # see `_FunctionEngine.has_walrus`
+            self.module_constants = self._constant_globals(module_env or {})
         for func in self._functions():
             if isinstance(func, ast.ClassDef):  # class body runs once, top to bottom
                 _FunctionEngine(self, func, frozenset()).run({})
@@ -321,11 +401,81 @@ class _FileEngine:
                 engine.visit_expression(func.body, params)
             else:
                 engine.run(params)
+            if self.facts is not None and id(func) in self.linked:
+                positional, keyword = parameters(func)  # type: ignore[arg-type]
+                returns = engine.returns
+                self.facts.functions[self.linked[id(func)]] = FunctionFacts(
+                    positional,
+                    keyword,
+                    _flow(self.ctx, returns) if returns is not None else None,
+                )
+        if self.facts is not None:
+            for key, (target, line, positional, keywords) in sorted(self._sites.items()):
+                self.facts.sites[key] = CallSite(
+                    target,
+                    line,
+                    tuple(_flow(self.ctx, v) for v in positional),
+                    tuple(sorted((k, _flow(self.ctx, v)) for k, v in keywords.items())),
+                )
         return self.results
 
     def record(self, call: ast.AST, value: Taint) -> None:
         prev = self.results.get(id(call))
         self.results[id(call)] = value if prev is None else combine((prev, value))
+
+    def call_target(self, call: ast.Call) -> str | None:
+        """Absolute dotted name of a module-level callee, when it can be named statically."""
+        if self.facts is None:
+            return None
+        if id(call) not in self._call_targets:
+            self._call_targets[id(call)] = self._resolve_target(call)
+        return self._call_targets[id(call)]
+
+    def _resolve_target(self, call: ast.Call) -> str | None:
+        assert self.facts is not None
+        parts: list[str] = []
+        func = call.func
+        while isinstance(func, ast.Attribute):
+            parts.append(func.attr)
+            func = func.value
+        if not isinstance(func, ast.Name) or not self.module_owned(func.id, call):
+            return None
+        entry = self.facts.symbols.get(func.id)
+        if entry is None:
+            return None
+        kind, target = entry
+        base = f"{self.facts.module}.{target}" if kind == "def" else target
+        return ".".join([base, *reversed(parts)])
+
+    def module_owned(self, name: str, node: ast.AST) -> bool:
+        """Whether `name` at `node` refers to the module-level binding."""
+        scope = self.ctx.scopes.scope_of(node)
+        first = True
+        while scope is not None:
+            if isinstance(scope.node, ast.ClassDef) and not first:
+                scope = scope.parent
+                continue
+            first = False
+            if name in scope.globals_:
+                return True
+            if name in scope.nonlocals or name in scope.bindings:
+                return scope is self.ctx.scopes.module
+            scope = scope.parent
+        return False
+
+    def record_site(self, call: ast.Call, positional: list[Taint], keywords: dict[str, Taint]):
+        target = self.call_target(call)
+        if target is None:
+            return
+        key = (call.lineno, call.col_offset)
+        prev = self._sites.get(key)
+        if prev is not None:
+            n = min(len(prev[2]), len(positional))
+            positional = [combine((a, b)) for a, b in zip(prev[2][:n], positional[:n], strict=True)]
+            keywords = {
+                k: combine((v, prev[3][k])) if k in prev[3] else v for k, v in keywords.items()
+            } | {k: v for k, v in prev[3].items() if k not in keywords}
+        self._sites[key] = (target, call.lineno, positional, keywords)
 
     def _functions(self) -> Iterator[ast.AST]:
         for node in ast.walk(self.ctx.tree):
@@ -333,13 +483,18 @@ class _FileEngine:
                 yield node
 
     def _constant_globals(self, module_env: Env) -> frozenset[str]:
-        """Module names bound only to immutable constants, never rebound via `global`."""
+        """Module names bound exactly once, to an immutable constant, never rebound via
+        `global` and with no way to write the module namespace dynamically. (A function
+        may run before a later rebinding, so the final value alone proves nothing.)"""
+        if self.namespace_exposed:
+            return frozenset()
         rebound = {
             name
             for node in ast.walk(self.ctx.tree)
             if isinstance(node, ast.Global)
             for name in node.names
         }
+        counts = _module_binding_counts(self.ctx.tree)
         module_scope = self.ctx.scopes.module
         constants = set()
         for name, value in module_env.items():
@@ -348,6 +503,7 @@ class _FileEngine:
                 value.is_constant
                 and not value.mutable
                 and name not in rebound
+                and counts.get(name) == 1
                 and all(k == "local" for k, _ in kinds)
             ):
                 constants.add(name)
@@ -359,10 +515,13 @@ class _FileEngine:
         names += [a.arg for a in (args.vararg, args.kwarg) if a is not None]
         route = is_route_handler(func)
         fname = getattr(func, "name", "<lambda>")
+        linked = self.linked.get(id(func))
         env: Env = {}
         for name in names:
             if route and name not in {"self", "cls"} and name not in REQUEST_PARAM_NAMES:
                 env[name] = source(f"route parameter `{name}` of handler `{fname}`", func)
+            elif linked is not None:
+                env[name] = _with_symbol(UNKNOWN, ("param", self.ctx.path, linked, name))
             else:
                 env[name] = UNKNOWN
         request_params = frozenset(n for n in names if n in REQUEST_PARAM_NAMES)
@@ -385,6 +544,22 @@ class _FunctionEngine:
         # States at `break` / `continue`, one collector per active loop.
         self.break_states: list[list[Env]] = []
         self.continue_states: list[list[Env]] = []
+        # Join of every returned value (linkable functions only).
+        self.track_returns = id(scope) in file.linked
+        self.returns: Taint | None = None
+        # `:=` can rebind a name mid-expression, conditionally (short-circuits, chained
+        # comparisons, `assert` messages, comprehension filters) or after an operand was
+        # already evaluated. Statements are interpreted as a whole, so in a scope with its
+        # own `:=` no sink is ever suppressed (confirmation still works).
+        self.has_walrus = _has_own_walrus(scope) or (
+            (self.is_module and file.namespace_exposed)
+            # `locals()` in a class body writes the real class namespace.
+            or (isinstance(scope, ast.ClassDef) and file.namespace.class_body(scope))
+        )
+        self.class_body = isinstance(scope, ast.ClassDef)
+        self.shared = _declared_shared(scope)
+        # >0 while scanning code that runs later (a generator expression's body).
+        self.deferred = 0
 
     # -- statements ------------------------------------------------------------------------
 
@@ -424,6 +599,9 @@ class _FunctionEngine:
             else:
                 self._assign(stmt.target, value, env, None)
         elif isinstance(stmt, (ast.Return, ast.Raise)):
+            if self.track_returns and isinstance(stmt, ast.Return) and stmt.value is not None:
+                value = self.eval(stmt.value, env)
+                self.returns = value if self.returns is None else combine((self.returns, value))
             return None
         elif isinstance(stmt, ast.Break):
             if self.break_states:
@@ -451,17 +629,25 @@ class _FunctionEngine:
             return self._try(stmt, env)
         elif isinstance(stmt, ast.Match):
             subject = self.eval(stmt.subject, env)
-            out: Env | None = dict(env)  # no case matched
+            # A failed pattern or a false guard may leave captures bound, so later cases
+            # and the no-match path see them too.
+            fall: Env = dict(env)
+            out: Env | None = None
             for case in stmt.cases:
-                case_env = dict(env)
+                case_env = dict(fall)
                 for node in ast.walk(case.pattern):
-                    name = getattr(node, "name", None)
+                    name = getattr(
+                        node, "rest" if isinstance(node, ast.MatchMapping) else "name", None
+                    )
                     if isinstance(name, str):
-                        case_env[name] = subject
+                        # The capture may be (part of) the subject object: alias them.
+                        target = ast.Name(id=name, ctx=ast.Store())
+                        self._assign(target, subject, case_env, stmt.subject)
                 if case.guard is not None:
                     self._scan(case.guard, case_env)
-                out = join_env(out, self.exec_block(case.body, case_env))
-            return out
+                fall = join_env(fall, case_env) or fall
+                out = join_env(out, self.exec_block(case.body, dict(case_env)))
+            return join_env(out, fall)
         elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             env[stmt.name] = UNKNOWN
         elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
@@ -547,7 +733,7 @@ class _FunctionEngine:
         elif isinstance(target, ast.Starred):
             self._assign(target.value, value, env, value_expr)
         elif isinstance(target, (ast.Attribute, ast.Subscript)):
-            base = _base_name(target)
+            base = _root_name(target)
             if base is not None:  # obj.x = v / d[k] = v: weak update of the container
                 self._weak_update(base, value, env)
             if value_expr is not None:  # storing a mutable elsewhere lets it escape
@@ -562,24 +748,150 @@ class _FunctionEngine:
                 for part in _header_nodes(node):
                     self._scan(part, env)
             return
+        if isinstance(node, COMPREHENSION_TYPES):
+            # Only the first iterable runs exactly once, now; the rest runs per item.
+            generators = node.generators  # type: ignore[attr-defined]
+            for gen in generators:  # `cmd.append(x) for cmd in commands` mutates commands
+                for target in ast.walk(gen.target):
+                    if isinstance(target, ast.Name):
+                        for name in self._mutable_names_in(gen.iter, env):
+                            self._union(target.id, name)
+            self._scan(generators[0].iter, env)
+            if self._mutates_targets(node):
+                # An item is mutated in place: the containers it came from change too.
+                for gen in generators:
+                    for name in self._mutable_names_in(gen.iter, env):
+                        self._weak_update(name, UNKNOWN, env)
+            for gen in generators:  # `for d[k] in items` stores into d
+                for target in ast.walk(gen.target):
+                    if isinstance(target, (ast.Subscript, ast.Attribute)):
+                        base = _root_name(target)
+                        if base is not None:
+                            self._weak_update(
+                                base, combine((self.eval(gen.iter, env), UNKNOWN)), env
+                            )
+            rest = [generators[0].target, *generators[0].ifs]
+            for gen in generators[1:]:
+                rest += [gen.iter, gen.target, *gen.ifs]
+            if isinstance(node, ast.DictComp):
+                rest += [node.key, node.value]
+            else:
+                rest.append(node.elt)  # type: ignore[attr-defined]
+            if isinstance(node, ast.GeneratorExp):
+                # Runs when consumed, possibly after its free names were rebound, so
+                # sinks there are never suppressed.
+                self.deferred += 1
+                try:
+                    for part in rest:
+                        self._scan(part, env)
+                finally:
+                    self.deferred -= 1
+                return
+            # Eager: filters run before the element, and each item sees the mutations of
+            # the previous ones; scan to a fixpoint (sink values join over all visits).
+            for _ in range(MAX_LOOP_ITERATIONS):
+                before = dict(env)
+                for part in rest:
+                    self._scan(part, env)
+                if env == before:
+                    break
+            else:  # no fixpoint within the budget: stay sound
+                for key in list(env):
+                    env[key] = combine((env[key], UNKNOWN))
+                for part in rest:
+                    self._scan(part, env)
+            return
+        callee = node.func if isinstance(node, ast.Call) else None
         for child in ast.iter_child_nodes(node):
-            self._scan(child, env)
+            if child is callee and isinstance(child, ast.Attribute):
+                self._scan(child.value, env)  # a method called right away, not extracted
+            else:
+                self._scan(child, env)
         if isinstance(node, ast.NamedExpr):
             self._assign(node.target, self.eval(node.value, env), env, node.value)
         elif isinstance(node, ast.Call):
             match = self.file.targets.get(id(node))
             if match is not None and match.arg is not None:
-                self.file.record(node, self.eval(match.arg, env))
+                value = self.eval(match.arg, env)
+                if self.has_walrus or self.deferred:
+                    value = combine((value, UNKNOWN))  # never suppressed (see __init__)
+                self.file.record(node, value)
+            if self.file.call_target(node) is not None:
+                self._record_site(node, env)
             self._call_effects(node, env)
+        elif (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, ast.Load)
+            and node.attr not in READONLY_METHODS | STRING_METHODS
+        ):
+            # `append = parts.append`: a bound method taken off a mutable object can
+            # change it later from anywhere.
+            for name in self._mutable_names_in(node.value, env):
+                self._weak_update(name, UNKNOWN, env)
+
+    def _mutates_targets(self, comp: ast.AST) -> bool:
+        """Whether a comprehension may change one of its items in place: a target used
+        as a non-read-only method receiver, stored into, or passed to a call that may
+        keep or change it (sinks, sanitizers, pure builtins and string methods do not)."""
+        targets = {
+            t.id
+            for gen in comp.generators  # type: ignore[attr-defined]
+            for t in ast.walk(gen.target)
+            if isinstance(t, ast.Name)
+        }
+        for node in ast.walk(comp):
+            if isinstance(node, ast.Call):
+                func = node.func
+                if (
+                    isinstance(func, ast.Attribute)
+                    and func.attr not in READONLY_METHODS | STRING_METHODS
+                    and any(  # `[cmd][0].append(x)`, `(cmd if c else d).append(x)`
+                        isinstance(n, ast.Name) and n.id in targets for n in ast.walk(func.value)
+                    )
+                ):
+                    return True
+                if any(
+                    isinstance(n, ast.Name) and n.id in targets
+                    for a in _call_args(node)
+                    for n in ast.walk(a)  # also `change([cmd])`
+                ) and not (
+                    id(node) in self.file.targets
+                    or self.ctx.call_names(node) & (NON_ESCAPING_CALLS | SANITIZERS.keys())
+                    or (isinstance(func, ast.Attribute) and func.attr in STRING_METHODS)
+                ):
+                    return True
+            if (
+                isinstance(node, (ast.Subscript, ast.Attribute))
+                and isinstance(node.ctx, ast.Store)
+                and _root_name(node) in targets
+            ):
+                return True
+        return False
+
+    def _record_site(self, call: ast.Call, env: Env) -> None:
+        positional = []
+        for arg in call.args:
+            if isinstance(arg, ast.Starred):
+                break  # later positions are unknown
+            positional.append(self.eval(arg, env))
+        keywords = {k.arg: self.eval(k.value, env) for k in call.keywords if k.arg is not None}
+        self.file.record_site(call, positional, keywords)
 
     def _call_effects(self, call: ast.Call, env: Env) -> None:
         args = _call_args(call)
         func = call.func
         # Mutating method on a mutable receiver: `parts.append(x)`, `d.setdefault(k, x)`.
         if isinstance(func, ast.Attribute) and func.attr not in READONLY_METHODS:
-            base = _base_name(func.value)
+            # The receiver may be any object named in it: `d.get(k).append(x)` mutates d,
+            # `(a if c else b).append(x)` mutates a or b.
+            receivers = set(self._mutable_names_in(func.value, env))
+            base = _root_name(func.value)
             if base is not None and self._lookup(base, func.value, env).mutable:
-                self._weak_update(base, combine(self.eval(a, env) for a in args), env)
+                receivers.add(base)
+            if receivers:
+                value = combine(self.eval(a, env) for a in args)
+                for name in sorted(receivers):
+                    self._weak_update(name, value, env)
         # Mutable arguments escaping into code we do not model may be changed by it.
         names = self.ctx.call_names(call)
         is_string_method = (
@@ -656,7 +968,10 @@ class _FunctionEngine:
         if isinstance(node, COMPREHENSION_TYPES):
             parts = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
             value = combine(self.eval(p, env) for p in parts)
-            return replace(value, mutable=not isinstance(node, ast.GeneratorExp) or value.mutable)
+            if isinstance(node, ast.GeneratorExp):
+                # Produced when consumed, possibly after its free names were rebound.
+                return combine((value, UNKNOWN))
+            return replace(value, mutable=True)
         if isinstance(node, (ast.List, ast.Set, ast.Dict)):
             children = [c for c in ast.iter_child_nodes(node) if isinstance(c, ast.expr)]
             return replace(combine(self.eval(c, env) for c in children), mutable=True)
@@ -670,18 +985,29 @@ class _FunctionEngine:
         return UNKNOWN
 
     def _lookup(self, name: str, node: ast.AST, env: Env) -> Taint:
-        if name in env:
-            value = env[name]
-            if name in self.closure_stores or (name in self.closure_loads and value.mutable):
-                return combine((value, UNKNOWN))  # a nested scope may change it
-            return value
+        # A comprehension target shadows any outer binding of the same name.
         comp = self._comprehension_binding(name, node, env)
         if comp is not None:
             return comp
+        # Class-body names are invisible inside comprehensions in that body.
+        hidden = self.class_body and self.ctx.scopes.scope_of(node).node is not self.scope
+        if name in env and not hidden:
+            value = env[name]
+            if (
+                name in self.closure_stores
+                or name in self.shared  # `global`/`nonlocal`: any call may rebind it
+                or (name in self.closure_loads and value.mutable)
+            ):
+                return combine((value, UNKNOWN))  # another scope may change it
+            return value
         for qualified in self.ctx.scopes.resolve_name(name, node):
             if qualified in SOURCE_NAMES:
                 return source(SOURCE_NAMES[qualified], node)
-        if not self.is_module and name in self.file.module_constants:
+        if (
+            not self.is_module
+            and name in self.file.module_constants
+            and self.file.module_owned(name, node)  # not an enclosing function's local
+        ):
             return CONST
         return UNKNOWN
 
@@ -689,10 +1015,14 @@ class _FunctionEngine:
         scope = self.ctx.scopes.scope_of(node)
         while scope is not None and scope.is_comprehension:
             if name in scope.bindings:
-                for gen in scope.node.generators:  # type: ignore[attr-defined]
-                    if any(isinstance(t, ast.Name) and t.id == name for t in ast.walk(gen.target)):
-                        return self.eval(gen.iter, env)
-                return UNKNOWN
+                binders = [
+                    gen
+                    for gen in scope.node.generators  # type: ignore[attr-defined]
+                    if any(isinstance(t, ast.Name) and t.id == name for t in ast.walk(gen.target))
+                ]
+                if len(binders) == 1 and not self._mutates_targets(scope.node):
+                    return self.eval(binders[0].iter, env)
+                return UNKNOWN  # rebound by a later `for`: which one applies depends on order
             scope = scope.parent
         return None
 
@@ -718,6 +1048,15 @@ class _FunctionEngine:
         )
 
     def _call(self, node: ast.Call, env: Env) -> Taint:
+        value = self._call_value(node, env)
+        if self.file.call_target(node) is None:
+            return value
+        if self.ctx.call_names(node) & (SOURCE_NAMES.keys() | SANITIZERS.keys()):
+            return value
+        # A linkable callee may return untrusted data of its own (resolved by `interproc`).
+        return _with_symbol(value, ("ret", self.ctx.path, node.lineno, node.col_offset))
+
+    def _call_value(self, node: ast.Call, env: Env) -> Taint:
         names = self.ctx.call_names(node)
         args = [self.eval(a, env) for a in _call_args(node)]
         for qualified in names:
@@ -737,6 +1076,7 @@ class _FunctionEngine:
                 mutable=False,
                 shell_plain=True if quoting else value.shell_plain,
                 quote_sanitized=quoting or value.quote_sanitized,
+                symbols=frozenset((a, s | safe) for a, s in value.symbols),
             )
         func = node.func
         if isinstance(func, ast.Attribute):
@@ -765,19 +1105,32 @@ def _call_args(node: ast.Call) -> list[ast.expr]:
     return [*node.args, *(k.value for k in node.keywords)]
 
 
-def _base_name(node: ast.AST) -> str | None:
-    while isinstance(node, (ast.Attribute, ast.Subscript, ast.Starred)):
-        node = node.value
-    return node.id if isinstance(node, ast.Name) else None
+def _root_name(node: ast.AST) -> str | None:
+    """Name a target or receiver is rooted at, also through method calls: `d.get(k)` or
+    `d.setdefault(k, [])` may return an object stored in `d`, so changing it changes `d`."""
+    while True:
+        if isinstance(node, (ast.Attribute, ast.Subscript, ast.Starred)):
+            node = node.value
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            node = node.func.value
+        else:
+            return node.id if isinstance(node, ast.Name) else None
 
 
 def _closure_names(scope: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
     """Names nested scopes inside `scope` read, and names they rebind (nonlocal/global)."""
     loads: set[str] = set()
     stores: set[str] = set()
-    for node in ast.walk(scope):
-        if node is scope or not isinstance(node, (*FUNCTION_TYPES, ast.ClassDef)):
-            continue
+    # Each outermost nested scope is walked once; its walk covers deeper nesting too.
+    outermost: list[ast.AST] = []
+    stack = list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (*FUNCTION_TYPES, ast.ClassDef)):
+            outermost.append(node)
+        else:
+            stack.extend(ast.iter_child_nodes(node))
+    for node in outermost:
         for inner in ast.walk(node):
             if isinstance(inner, ast.Name):
                 loads.add(inner.id)
@@ -786,6 +1139,129 @@ def _closure_names(scope: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
             ):
                 stores.update(inner.names)
     return frozenset(loads), frozenset(stores)
+
+
+def _own_nodes(scope: ast.AST) -> Iterator[ast.AST]:
+    """Nodes of code that runs in `scope`. Nested function and class bodies are other
+    scopes; their name, decorators, defaults and bases (and comprehensions, whose `:=`
+    binds here) belong to this one."""
+    if isinstance(scope, ast.Lambda):
+        stack: list[ast.AST] = [scope.body]
+    else:
+        stack = list(scope.body)  # type: ignore[attr-defined]
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (*FUNCTION_TYPES, ast.ClassDef)):
+            stack.extend(outer_parts(node))
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _has_own_walrus(scope: ast.AST) -> bool:
+    return any(isinstance(node, ast.NamedExpr) for node in _own_nodes(scope))
+
+
+def _declared_shared(scope: ast.AST) -> frozenset[str]:
+    """Names `scope` declares `global`/`nonlocal` (other code may rebind them)."""
+    if isinstance(scope, ast.Module):
+        return frozenset()
+    return frozenset(
+        name
+        for node in _own_nodes(scope)
+        if isinstance(node, (ast.Global, ast.Nonlocal))
+        for name in node.names
+    )
+
+
+def _module_binding_counts(tree: ast.Module) -> dict[str, int]:
+    """How many binding sites each module-level name has (over-counting is safe)."""
+    counts: dict[str, int] = {}
+    for node in _own_nodes(tree):
+        names: list[str] = []
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names = [node.id]
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = [node.name]
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [(a.asname or a.name).split(".")[0] for a in node.names]
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            names = [node.name]
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names = [node.rest]
+        for name in names:
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+# Ways code can write module globals by name at runtime.
+NAMESPACE_FUNCTIONS = frozenset({"globals", "vars", "locals", "exec", "eval", "__import__"})
+NAMESPACE_ATTRIBUTES = frozenset({"__dict__", "__globals__", "modules", "__builtins__"})
+
+
+class _Namespace:
+    """Whether a namespace may be written by name at runtime: the module's (anywhere in
+    the file) or a class body's (only code in that body can). Any spelling counts:
+    `exec`, `builtins.exec`, `from builtins import exec as run`, `run = exec` (assigned
+    aliases are followed file-wide). Computed once per file."""
+
+    def __init__(self, tree: ast.Module) -> None:
+        self.imported = any(  # writers imported under another name
+            (
+                isinstance(node, ast.ImportFrom)
+                and any(
+                    a.name == "*"  # a star import may also rebind our names
+                    or a.name in NAMESPACE_FUNCTIONS
+                    or a.name in NAMESPACE_ATTRIBUTES
+                    or a.name == "__builtins__"
+                    for a in node.names
+                )
+            )
+            or (
+                isinstance(node, ast.Import)
+                and any(a.name.split(".")[0] == "builtins" for a in node.names)
+            )
+            for node in ast.walk(tree)
+        )
+        self.writers = set(NAMESPACE_FUNCTIONS) | {"__builtins__"}
+        self.module = self.imported or any(
+            _mentions_writer(node, self.writers) for node in ast.walk(tree)
+        )
+        if not self.module:
+            return  # no writer anywhere: no aliases either
+        # Names bound (anywhere) from an expression that mentions a writer are writers too.
+        assignments = [
+            (node.value, node.targets if isinstance(node, ast.Assign) else [node.target])
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr))
+            and node.value is not None
+        ]
+        changed = True
+        while changed:
+            changed = False
+            for value, targets in assignments:
+                if not any(_mentions_writer(part, self.writers) for part in ast.walk(value)):
+                    continue
+                for target in targets:
+                    for name in ast.walk(target):
+                        if isinstance(name, ast.Name) and name.id not in self.writers:
+                            self.writers.add(name.id)
+                            changed = True
+
+    def class_body(self, scope: ast.ClassDef) -> bool:
+        if not self.module:
+            return False
+        return self.imported or any(
+            _mentions_writer(node, self.writers) for node in _own_nodes(scope)
+        )
+
+
+def _mentions_writer(node: ast.AST, writers: set[str]) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in writers
+    if isinstance(node, ast.Attribute):
+        return node.attr in NAMESPACE_ATTRIBUTES or node.attr in NAMESPACE_FUNCTIONS
+    return False
 
 
 def _header_nodes(stmt: ast.stmt) -> list[ast.AST]:

@@ -390,7 +390,15 @@ def verify_evidence(ctx: FileContext, finding: Finding, line: int, kind: str) ->
         covered = {target.id}
     elif kind == "guard":
         covered = _allow_list_guard(stmt, finding.vuln_class)
-        ok = bool(covered) and sink_names <= covered
+        # A guard only holds for the function's own locals: a global or enclosing
+        # variable can be changed by any call between the guard and the sink.
+        scope = ctx.scopes.scope_of(stmt)
+        own = {
+            n
+            for n in covered
+            if n in scope.bindings and n not in scope.globals_ and n not in scope.nonlocals
+        }
+        ok = bool(covered) and sink_names <= own
     else:
         return False
     return ok and not _rebound_after(func, covered, stmt)
