@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import json
 import textwrap
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
+from hackscan.analyzers.llm_pass import LLMReport
 from hackscan.config import HackScanConfig
 from hackscan.core import pipeline
+from hackscan.core.models import Fix, FixEdit
 from hackscan.core.pipeline import scan
+from hackscan.plugins.loader import builtin_plugins
+from hackscan.sarif.generator import export_sarif
 
 CORPUS = Path(__file__).parent / "corpus"
 
@@ -54,3 +62,50 @@ def test_unparseable_files_are_reported_not_fatal(tmp_path: Path):
     result = scan(tmp_path, HackScanConfig())
     assert len(result.findings) == 1
     assert any("broken.py" in e and "cannot parse" in e for e in result.errors)
+
+
+def test_template_fix_containing_known_secret_is_dropped(tmp_path: Path):
+    secret = "secret-abc123"
+    (tmp_path / "m.py").write_text(
+        'import os\napi_token = "secret-abc123"\n'
+        'def run(x):\n    os.system(f"printf secret-abc123 {x}")\n',
+        encoding="utf-8",
+    )
+    result = scan(tmp_path, HackScanConfig())
+    assert secret in result.secrets
+    assert result.findings
+    assert all(f.fix is None for f in result.findings)
+    dumped = json.dumps([f.to_dict() for f in result.findings])
+    dumped += json.dumps(export_sarif(result, builtin_plugins()))
+    assert secret not in dumped
+
+
+@pytest.mark.parametrize("secret_field", ["description", "replacement"])
+def test_llm_fix_containing_known_secret_is_dropped(tmp_path: Path, monkeypatch, secret_field):
+    secret = "secret-abc123"
+    (tmp_path / "m.py").write_text(
+        'import os\napi_token = "secret-abc123"\ndef run(x):\n    os.system(f"printf safe {x}")\n',
+        encoding="utf-8",
+    )
+
+    def triage_with_secret_fix(findings, _index, _config, **_kwargs):
+        fix = Fix(
+            f"Apply {secret if secret_field == 'description' else 'safe fix'}",
+            (
+                FixEdit(
+                    findings[0].location,
+                    "subprocess.call(['printf', '"
+                    + (secret if secret_field == "replacement" else "safe")
+                    + "', x])",
+                ),
+            ),
+            "llm",
+        )
+        return LLMReport([replace(findings[0], fix=fix)], [], 1)
+
+    monkeypatch.setattr(pipeline, "triage", triage_with_secret_fix)
+    result = scan(tmp_path, HackScanConfig(fixes=False, llm=True))
+    assert result.findings[0].fix is None
+    dumped = json.dumps([f.to_dict() for f in result.findings])
+    dumped += json.dumps(export_sarif(result, builtin_plugins()))
+    assert secret not in dumped

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 import shutil
 from pathlib import Path
@@ -515,7 +516,8 @@ def test_secret_literal_values_decode_bytes_and_limit_partial_pieces():
         'access_key = "four"\n'
     )
     values = secret_literal_values(tree)
-    assert {"bytes-secret-123", "-suffix-secret", "long-secret-123", "four"} <= values
+    assert {"bytes-secret-123", "-suffix-secret", "long-secret-123"} <= values
+    assert "four" not in values
     assert "pre-" not in values
     assert "small" not in values
 
@@ -564,7 +566,7 @@ def test_author_assignment_is_not_masked():
 
 
 @pytest.mark.parametrize("tool_snippet", [False, True])
-def test_unparseable_python_fallback_snippet_is_redacted(tmp_path, tool_snippet):
+def test_unparseable_python_fallback_snippet_is_empty(tmp_path, tool_snippet):
     secret = "loop-secret-12345"
     (tmp_path / "broken.py").write_text(
         f'for api_token in ("{secret}",):\n    pass\nif (\n', encoding="utf-8"
@@ -601,4 +603,59 @@ def test_unparseable_python_fallback_snippet_is_redacted(tmp_path, tool_snippet)
     )
     result = scan(tmp_path, HackScanConfig(imports=(("bandit", report),)))
     assert result.findings
+    assert result.findings[0].snippet == ""
     assert secret not in json.dumps([f.to_dict() for f in result.findings])
+
+
+@pytest.mark.parametrize("tool_snippet", [False, True])
+@pytest.mark.parametrize("filename", ["broken.py", "broken.js"])
+def test_multiline_secret_in_unparseable_file_has_no_snippet(tmp_path, tool_snippet, filename):
+    from rich.console import Console
+
+    from hackscan.cli import _text
+    from hackscan.plugins.loader import builtin_plugins
+    from hackscan.sarif.generator import export_sarif
+    from hackscan.ui.render import render
+
+    secret = "secret-abc123"
+    (tmp_path / filename).write_text(f'api_token = """\n{secret}\n"""\nif (\n', encoding="utf-8")
+    region = {"startLine": 2}
+    if tool_snippet:
+        region["snippet"] = {"text": secret}
+    report = tmp_path / "r.sarif"
+    report.write_text(
+        json.dumps(
+            {
+                "runs": [
+                    {
+                        "tool": {"driver": {"name": "Bandit"}},
+                        "results": [
+                            {
+                                "ruleId": "B605",
+                                "message": {"text": "possible issue"},
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": filename},
+                                            "region": region,
+                                        }
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = scan(tmp_path, HackScanConfig(imports=(("bandit", report),)))
+    (finding,) = result.findings
+    assert finding.snippet == ""
+    assert secret not in json.dumps([finding.to_dict()])
+    assert secret not in json.dumps(export_sarif(result, builtin_plugins()))
+    text_output = _text(result, [finding], HackScanConfig(), quiet=True)
+    assert "    | " not in text_output
+    rich_output = io.StringIO()
+    render(Console(file=rich_output, force_terminal=False), result, [finding], HackScanConfig())
+    assert secret not in rich_output.getvalue()

@@ -21,7 +21,7 @@ from hackscan.config import DEFAULT_IGNORES, HackScanConfig
 from hackscan.core.dedupe import merge_findings
 from hackscan.core.fingerprint import assign_ids
 from hackscan.core.models import Finding
-from hackscan.core.redact import redact_findings, redact_messages
+from hackscan.core.redact import drop_secret_fixes, redact_findings, redact_messages
 from hackscan.importers.common import SourceIndex
 from hackscan.importers.runner import ToolRun, collect
 from hackscan.plugins.base import RulePlugin
@@ -78,7 +78,7 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
     known_secrets.update(external.secrets)
     final = assign_ids(redact_findings(merge_findings(findings), known_secrets))
     if config.fixes:
-        final = generate_fixes(final, index)
+        final = drop_secret_fixes(generate_fixes(final, index), known_secrets)
     warnings = list(external.warnings)
     llm_reviewed = 0
     if config.llm:
@@ -99,7 +99,7 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
             ),
         )
         # Model text is untrusted too: redact again before anything is printed.
-        final = redact_findings(report.findings, known_secrets)
+        final = redact_findings(drop_secret_fixes(report.findings, known_secrets), known_secrets)
         warnings.extend(report.warnings)
         llm_reviewed = report.reviewed
     return ScanResult(

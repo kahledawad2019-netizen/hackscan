@@ -32,7 +32,7 @@ _ASSIGNED_RE = re.compile(r"(?P<key>[=:]\s*)(?P<value>[^\s#'\"][^#]*?)(?P<tail>\
 
 
 def redact_text(text: str, secrets: Iterable[str], literals: bool) -> str:
-    for secret in sorted(set(secrets), key=len, reverse=True):
+    for secret in sorted(set(secrets), key=lambda s: (-len(s), s)):
         if len(secret) >= MIN_SECRET_LENGTH:
             text = text.replace(secret, REDACTED)
     if literals:
@@ -138,12 +138,15 @@ def _secret_value_nodes(tree: ast.AST) -> Iterator[ast.AST]:
 
 
 def secret_literal_values(tree: ast.AST) -> set[str]:
-    """Text of secret literals, plus sufficiently long partial pieces and lines."""
+    """Secret-like source values for report-wide redaction."""
+
+    def secret_like(text: str) -> bool:
+        return len(text) >= 8 and (
+            len(text) >= 16 or any(c.isdigit() or not c.isalnum() for c in text)
+        )
+
     secrets: set[str] = set()
     for value in _secret_value_nodes(tree):
-        parents = {
-            id(child): node for node in ast.walk(value) for child in ast.iter_child_nodes(node)
-        }
         for node in ast.walk(value):
             if not isinstance(node, ast.Constant) or not isinstance(node.value, (str, bytes)):
                 continue
@@ -152,19 +155,29 @@ def secret_literal_values(tree: ast.AST) -> set[str]:
                 if isinstance(node.value, bytes)
                 else node.value
             )
-            minimum = (
-                MIN_SECRET_PART_LENGTH
-                if isinstance(parents.get(id(node)), ast.JoinedStr)
-                else MIN_SECRET_LENGTH
-            )
-            if len(literal) >= minimum:
+            if secret_like(literal):
                 secrets.add(literal)
             if "\n" in literal or "\r" in literal:
                 for line in literal.splitlines():
                     line = line.strip()
-                    if len(line) >= MIN_SECRET_PART_LENGTH:
+                    if len(line) >= MIN_SECRET_PART_LENGTH and secret_like(line):
                         secrets.add(line)
     return secrets
+
+
+def drop_secret_fixes(findings: list[Finding], secrets: Iterable[str]) -> list[Finding]:
+    """Discard fixes whose edit or description contains a known secret."""
+    known = tuple(secret for secret in secrets if secret)
+    out = []
+    for finding in findings:
+        fix = finding.fix
+        if fix is not None and any(
+            secret in fix.description or any(secret in edit.replacement for edit in fix.edits)
+            for secret in known
+        ):
+            finding = replace(finding, fix=None)
+        out.append(finding)
+    return out
 
 
 def mask_secret_literals(source: str, tree: ast.AST) -> str:

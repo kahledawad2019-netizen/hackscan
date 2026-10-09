@@ -159,6 +159,20 @@ def test_verified_guard_suppresses_through_triage(tmp_path, body, line):
     assert any(e.kind == "llm_evidence" for e in f.evidence)
 
 
+@pytest.mark.parametrize(("allowed", "suppressed"), [("0,999", False), ("10", True)])
+def test_sql_limit_allow_list_rejects_offset_count(tmp_path, allowed, suppressed):
+    code = (
+        "import sqlite3\n\n"
+        "def run(cur, limit):\n"
+        f'    if limit not in {{"{allowed}", "20"}}:\n'
+        "        return\n"
+        '    cur.execute(f"SELECT * FROM users LIMIT {limit}")\n'
+    )
+    report = run(tmp_path, code, FakeOllama(answer("false_positive", line=4, kind="guard")))
+    (finding,) = report.findings
+    assert (finding.status is Status.SUPPRESSED) is suppressed
+
+
 def evidence_ok(tmp_path, body, line, kind, params="cmd, flag=False, extra=''"):
     code = f"import os, shlex\n\ndef run({params}):\n{body}    os.system(cmd)\n"
     findings, index = setup(tmp_path, code)

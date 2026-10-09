@@ -182,8 +182,10 @@ class PickleLoads(RulePlugin):
   fix is offered for a call that contains a secret, or for SQL containing comments.
 - String and bytes literals assigned to secret-looking names (`api_key`, `password`, `token`, ...)
   are masked in snippets, the LLM context and fix diffs. Their values are also removed
-  from imported messages and evidence before output or LLM triage. For files that cannot
-  be parsed, fallback snippets conservatively redact literals and assigned values.
+  from imported messages and evidence before output or LLM triage when the value is
+  secret-like (at least eight characters with a digit or symbol, or at least sixteen
+  characters). Known secrets in proposed fixes cause the fix to be omitted. Imported
+  findings for files that cannot be parsed have no source snippet.
 
 ## Development
 

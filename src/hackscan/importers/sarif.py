@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 from hackscan.core.models import Evidence, Finding, Severity
-from hackscan.core.redact import redact_code
 from hackscan.core.taxonomy import classify, normalize_cwes
 from hackscan.importers.common import (
     SEVERITY_FROM_LEVEL,
@@ -119,12 +118,8 @@ def _convert(
     message = (raw.get("message") or {}).get("text") or rule.get("shortDescription", {}).get(
         "text", rule_key
     )
-    # Source we parsed wins (secret literals masked); a tool's own snippet is a fallback.
-    tool_snippet = redact_code(str((reg.get("snippet") or {}).get("text") or ""), ())
-    if index.context(rel) is not None:
-        snippet = index.line_text(rel, region.start_line)
-    else:
-        snippet = tool_snippet or index.line_text(rel, region.start_line)
+    # Only parsed source has a trustworthy masked snippet.
+    snippet = index.line_text(rel, region.start_line)
     sink, function = index.enrich(region)
     return Finding(
         id="",

@@ -16,7 +16,7 @@ from urllib.parse import unquote, urlparse
 
 from hackscan.analyzers.ast_pass import _qualnames
 from hackscan.core.models import Region, Severity
-from hackscan.core.redact import redact_code, secret_literal_values
+from hackscan.core.redact import secret_literal_values
 from hackscan.plugins.base import FileContext
 
 
@@ -138,12 +138,7 @@ class SourceIndex:
         if loaded is not None:
             lines = loaded[0].masked_lines
             return lines[line - 1] if 0 < line <= len(lines) else ""
-        try:
-            lines = (self.root / rel_path).read_text(encoding="utf-8", errors="replace")
-            split = lines.splitlines()
-            return redact_code(split[line - 1], ()) if 0 < line <= len(split) else ""
-        except OSError:
-            return ""
+        return ""
 
     def enrich(self, region: Region) -> tuple[str, str | None]:
         """(sink text, enclosing function qualname) for a region in a Python file.

@@ -337,3 +337,8 @@ hackscan/
   output and LLM triage; fallback snippets from unparseable files redact literals and
   assigned values; `echo` and `dir` no longer get shell-less command fixes because they
   are Windows cmd.exe builtins.
+- 2026-10-09 (release gate): SQL LIMIT allow-list values cannot contain commas; template
+  and LLM fixes containing a known secret are dropped before export. Imported findings
+  have no snippet unless their Python source parses, preventing multi-line secret leaks.
+  Equal-length secrets are redacted in lexical order, and only secret-like source values
+  join report-wide known secrets; local source masking still covers every secret-named literal.

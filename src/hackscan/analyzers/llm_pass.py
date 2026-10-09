@@ -543,7 +543,7 @@ def _inert_allow_value(value: object, vuln_class: str) -> bool:
         return True
     if type(value) is not str or value.startswith("-"):
         return False
-    if re.fullmatch(r"[A-Za-z0-9_.:@/+=,]*", value) is None:
+    if re.fullmatch(r"[A-Za-z0-9_.:@/+=]*", value) is None:
         return False
     if vuln_class == "codei":
         return bool(re.fullmatch(r"[0-9]+", value)) or (
