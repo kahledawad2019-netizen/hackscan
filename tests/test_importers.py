@@ -377,3 +377,38 @@ def test_gitleaks_secrets_in_one_file_keep_distinct_ids(tmp_path):
     result = scan(tmp_path, HackScanConfig(imports=(("gitleaks", report),)))
     assert len({f.id for f in result.findings}) == 2
     assert all("@L" in f.sink for f in result.findings)
+
+
+def test_tool_snippet_never_restores_a_masked_secret(tmp_path):
+    # Codex verify round 3: a SARIF snippet used to win over the masked source line.
+    from hackscan.plugins.loader import builtin_plugins
+    from hackscan.sarif.generator import export_sarif
+
+    token = "hackscan-fake-token-0123456789"
+    (tmp_path / "m.py").write_text(
+        # No own finding on this line, so the imported one stands alone (no merge).
+        f'import random\n\ndef f():\n    API_TOKEN = "{token}"; return random.random()\n'
+    )
+    location = {
+        "physicalLocation": {
+            "artifactLocation": {"uri": "m.py"},
+            "region": {"startLine": 4, "snippet": {"text": f'API_TOKEN = "{token}"'}},
+        }
+    }
+    sarif = {
+        "runs": [
+            {
+                "tool": {"driver": {"name": "Bandit", "rules": [{"id": "B311"}]}},
+                "results": [
+                    {"ruleId": "B311", "message": {"text": "random"}, "locations": [location]}
+                ],
+            }
+        ]
+    }
+    report = tmp_path / "r.sarif"
+    report.write_text(json.dumps(sarif))
+    result = scan(tmp_path, HackScanConfig(imports=(("bandit", report),)))
+    assert any("bandit" in f.sources for f in result.findings)
+    dumped = json.dumps([f.to_dict() for f in result.findings])
+    dumped += json.dumps(export_sarif(result, builtin_plugins()))
+    assert token not in dumped

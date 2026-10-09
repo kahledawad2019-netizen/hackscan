@@ -301,7 +301,7 @@ def _apply(finding: Finding, answer: dict[str, Any], ctx, config, rescan) -> Fin
         )
         if verified is not None:
             kind, line = verified
-            cited = ctx.lines[line - 1].strip()
+            cited = ctx.masked_lines[line - 1].strip()
             return replace(
                 finding,
                 status=Status.SUPPRESSED,

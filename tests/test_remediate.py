@@ -354,7 +354,5 @@ def test_no_argv_fix_for_interpreters_or_option_arguments(tmp_path: Path, comman
 
 
 def test_value_after_end_of_options_is_fixed(tmp_path: Path):
-    _, new = fixed_source(
-        tmp_path, 'import os\n\ndef f(p):\n    os.system(f"tar -cf out.tar -- {p}")\n'
-    )
-    assert "subprocess.call(['tar', '-cf', 'out.tar', '--', str(p)])" in new
+    _, new = fixed_source(tmp_path, 'import os\n\ndef f(p):\n    os.system(f"ls -l -- {p}")\n')
+    assert "subprocess.call(['ls', '-l', '--', str(p)])" in new

@@ -123,6 +123,12 @@ def mask_secret_literals(source: str, tree: ast.AST) -> str:
         elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and node.value:
             if _secret_named(node.target):
                 values.append(node.value)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            if _secret_named(node.target):  # `for api_token in ("...",)`
+                values.append(node.iter)
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            if _secret_named(node.optional_vars):
+                values.append(node.context_expr)
         elif isinstance(node, ast.keyword) and node.arg and SECRET_NAME_RE.search(node.arg):
             values.append(node.value)
         elif isinstance(node, ast.Dict):

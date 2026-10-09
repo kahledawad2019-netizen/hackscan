@@ -601,6 +601,10 @@ def test_missing_model_message_is_actionable(monkeypatch):
         ("    api_key, user = 'tuple-secret-1', 'bob'\n", ["tuple-secret-1"]),
         ("    *_, token = ['x', 'star-secret-1']\n", ["star-secret-1"]),
         ('    os.system(cmd, password="kw-secret-9")\n', ["kw-secret-9"]),  # in the call
+        # Codex verify round 3: loop, comprehension and `with` targets
+        ('    for api_token in ("loop-secret-12345",):\n        pass\n', ["loop-secret-12345"]),
+        ("    keys = [token for token in ('comp-secret-1',)]\n", ["comp-secret-1"]),
+        ("    with connect('with-secret-1') as auth_token:\n        pass\n", ["with-secret-1"]),
     ],
 )
 def test_split_and_triple_quoted_secrets_are_redacted(tmp_path, assignment, pieces):
@@ -611,3 +615,18 @@ def test_split_and_triple_quoted_secrets_are_redacted(tmp_path, assignment, piec
     for piece in pieces:
         assert piece not in sent, piece
     assert "os.system(cmd)" in sent  # the code itself is still shown
+
+
+def test_verified_evidence_quotes_masked_source(tmp_path):
+    # Codex verify round 3: "Verified constant at line N: <line>" quoted raw source.
+    from hackscan.analyzers.llm_pass import _apply
+
+    code = (
+        "import os\n\ndef run():\n    api_token = 'tok-evidence-secret'\n    os.system(api_token)\n"
+    )
+    findings, index = setup(tmp_path, code)
+    ctx, _ = index.context("m.py")
+    (f,) = [f for f in findings if f.rule_id == "HS-CMDI-001"]
+    out = _apply(f, answer("false_positive", line=4, kind="constant"), ctx, LLMConfig(), None)
+    assert out.status is Status.SUPPRESSED
+    assert "tok-evidence-secret" not in json.dumps(out.to_dict())

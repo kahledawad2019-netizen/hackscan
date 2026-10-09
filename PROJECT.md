@@ -325,3 +325,10 @@ hackscan/
   own findings and imported ones come from masked source; a call containing a secret
   literal gets no fix (a fix must carry the real code); diffs mask both sides from
   their own syntax trees. Masking also covers walrus and unpacking targets.
+- 2026-10-09 (stop-time review + Codex verify round 3): the interpreter denylist could
+  never be complete (`npx PKG`, `tar --to-command`, `find -exec`...), so argv fixes now
+  use an allowlist of programs with inert arguments (`INERT_PROGRAMS`: echo, cat, ls,
+  grep, head...; `.bat`/`.cmd` never match). Masking covers `for`/comprehension/`with`
+  targets; for parsed Python files the snippet always comes from masked source (a tool's
+  SARIF snippet only as a fallback, redacted); LLM evidence quotes masked source. Round 3
+  confirmed all earlier fixes and found no regressions (fingerprints, dedupe, pool).
