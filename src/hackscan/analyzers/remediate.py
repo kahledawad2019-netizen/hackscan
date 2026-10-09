@@ -48,6 +48,7 @@ _VALUE_POSITION_RE = re.compile(
 )
 # `IN (` expects a list: `IN ({ids})` with ids="1,2" means two values, `IN (?)` one.
 _IN_LIST_RE = re.compile(r"\bin\s*\([^)]*$", re.I)
+SQL_COMMENTS = ("--", "/*", "#")  # `#` starts a comment in MySQL
 SHELL_META = set("|&;<>$`*?(){}[]~!#\\'\"\n")
 
 
@@ -188,6 +189,8 @@ def _operand(expr: ast.AST) -> list[str | ast.AST] | None:
 
 
 def _parameterize(parts: list[str | ast.AST], placeholder: str):
+    if any(isinstance(p, str) and any(c in p for c in SQL_COMMENTS) for p in parts):
+        return None, []  # comments can hide what a position means (`typeof(/* VALUES ( */?)`)
     sql = ""
     params: list[ast.AST] = []
     pending_quote = None

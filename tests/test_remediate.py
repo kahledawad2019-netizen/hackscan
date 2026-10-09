@@ -296,7 +296,15 @@ def test_multiline_call_fix(tmp_path: Path):
 
 @pytest.mark.parametrize(
     "query",
-    ['f"SELECT typeof({x})"', 'f"SELECT a, {x} FROM t"', 'f"SELECT * FROM t WHERE f({x}) = 1"'],
+    [
+        'f"SELECT typeof({x})"',
+        'f"SELECT a, {x} FROM t"',
+        'f"SELECT * FROM t WHERE f({x}) = 1"',
+        # Codex verify round: a comment that fakes a value position
+        'f"SELECT typeof(/* VALUES ( */{x})"',
+        'f"SELECT typeof(-- = \\n{x})"',
+        'f"SELECT * FROM t WHERE id = {x} -- note"',
+    ],
 )
 def test_no_placeholder_in_function_calls_or_select_lists(tmp_path: Path, query):
     code = f"import sqlite3\ndef f(cur, x):\n    cur.execute({query})\n"

@@ -310,3 +310,10 @@ hackscan/
   after LIMIT/OFFSET (not `typeof(?)` or select lists). String literals assigned to
   secret-looking names are redacted by raw source text, so implicitly joined and
   triple-quoted secrets never reach the model or fix diffs.
+- 2026-10-09 (Codex verify round): token/word comparison was bypassable (extra computed
+  argv element, swapped SQL parameters, SQL comments). LLM fixes must now equal what
+  HackScan derives itself: argv element-for-element (`str()` wrapper ignored), SQL text
+  exactly plus the original values in order. SQL containing comments (`--`, `/*`, `#`)
+  gets no fix. Secret literals are masked character for character in the source
+  (lines/columns kept) for LLM context and diffs. Rebinding is judged by (line, column)
+  outside the cited statement; any `nonlocal`/`global` of the name voids the evidence.

@@ -641,7 +641,6 @@ def _plausible_rewrite(vuln_class: str, original: ast.Call, new: ast.Call, ctx) 
             and isinstance(original.func, ast.Attribute)
             and func.attr == original.func.attr
             and ast.dump(func.value) == ast.dump(original.func.value)
-            and len(new.args) >= 2  # query plus parameters
             and _same_sql(original, new)
         )
     allowed = SAFE_REWRITES.get(vuln_class)
@@ -650,7 +649,7 @@ def _plausible_rewrite(vuln_class: str, original: ast.Call, new: ast.Call, ctx) 
     names = {n for n in _dotted(func)}
     if not names & allowed:
         return False
-    return vuln_class != "cmdi" or _same_program(original, new)
+    return vuln_class != "cmdi" or _same_program(original, new, ctx)
 
 
 # A rewrite must not hand the value to another interpreter (`sh -c`, `python -c`...).
@@ -664,57 +663,73 @@ SAFE_SUBPROCESS_KEYWORDS = {
     "check", "capture_output", "text", "timeout", "stdout", "stderr", "encoding", "errors",
     "universal_newlines",
 }  # fmt: skip
-_SQL_PLACEHOLDER_RE = re.compile(r"%\(\w+\)s|%s|\?|:\w+|\$\d+")
-_SQL_TOKEN_RE = re.compile(r"[A-Za-z_]\w*|\d+(?:\.\d+)?|[^\s'\"]")
 
 
-def _literal_parts(expr: ast.AST) -> list[str | None] | None:
-    """Literal text (str) and interpolated values (None) of a string-building expression."""
-    from hackscan.analyzers.remediate import _sql_parts
+def _same_value(a: ast.AST, b: ast.AST) -> bool:
+    """Same expression, ignoring a `str(...)` wrapper (argv elements must be strings)."""
 
-    parts = _sql_parts(expr)
-    if parts is None:
-        return None
-    return [p if isinstance(p, str) else None for p in parts]
+    def unwrap(node: ast.AST) -> ast.AST:
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "str"
+            and len(node.args) == 1
+            and not node.keywords
+        ):
+            return node.args[0]
+        return node
+
+    return ast.dump(unwrap(a)) == ast.dump(unwrap(b))
 
 
-def _same_program(original: ast.Call, new: ast.Call) -> bool:
-    """The argv rewrite runs the original program with the original literal words, in
-    order, every other element being one of the original values; never a shell."""
-    if not original.args or not new.args or not isinstance(new.args[0], (ast.List, ast.Tuple)):
+def _same_program(original: ast.Call, new: ast.Call, ctx: FileContext) -> bool:
+    """The rewrite's argv is exactly the one HackScan derives from the original command
+    (same program, words and values, in order; nothing added); never a shell."""
+    from hackscan.analyzers.remediate import _argv
+
+    if not original.args or len(new.args) != 1:
         return False
-    if any(k.arg not in SAFE_SUBPROCESS_KEYWORDS for k in new.keywords) or len(new.args) != 1:
+    if not isinstance(new.args[0], (ast.List, ast.Tuple)):
         return False
-    parts = _literal_parts(original.args[0])
-    if parts is None:
+    if any(k.arg not in SAFE_SUBPROCESS_KEYWORDS for k in new.keywords):
         return False
-    words = [w.strip("'\"") for p in parts if p is not None for w in p.split()]
-    words = [w for w in words if w]
+    expected = _argv(original.args[0], ctx)
+    if not expected:
+        return False
+    wanted = [ast.parse(src, mode="eval").body for src in expected]
     argv = new.args[0].elts
-    literal = [e.value for e in argv if isinstance(e, ast.Constant) and isinstance(e.value, str)]
-    if any(isinstance(e, ast.Starred) for e in argv):
+    if len(argv) != len(wanted) or not all(map(_same_value, argv, wanted)):
         return False
-    if not argv or not isinstance(argv[0], ast.Constant) or not literal or not words:
+    program = wanted[0]
+    if not (isinstance(program, ast.Constant) and isinstance(program.value, str)):
         return False
-    program = literal[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
-    return program not in SHELL_PROGRAMS and literal == words and argv[0].value == words[0]
-
-
-def _sql_tokens(text: str) -> list[str]:
-    return [t.lower() for t in _SQL_TOKEN_RE.findall(_SQL_PLACEHOLDER_RE.sub(" ", text))]
+    name = program.value.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name not in SHELL_PROGRAMS
 
 
 def _same_sql(original: ast.Call, new: ast.Call) -> bool:
-    """The new query is one string literal with the original SQL text, values replaced by
-    placeholders: same statement, tables and conditions (no SELECT -> DELETE)."""
-    query = new.args[0]
+    """The rewrite is exactly the parameterized query HackScan derives from the original
+    (same text, comments and line breaks; placeholders in the same places) with the
+    original values as parameters, in order."""
+    from hackscan.analyzers.remediate import _parameterize, _sql_parts
+
+    if not original.args or len(new.args) != 2 or new.keywords:
+        return False
+    query, params = new.args
     if not (isinstance(query, ast.Constant) and isinstance(query.value, str)):
         return False
-    parts = _literal_parts(original.args[0]) if original.args else None
+    if not isinstance(params, (ast.Tuple, ast.List)):
+        return False
+    parts = _sql_parts(original.args[0])
     if parts is None:
         return False
-    before = " ".join(" " if p is None else p for p in parts)
-    return _sql_tokens(before) == _sql_tokens(query.value)
+    for placeholder in ("?", "%s"):
+        sql, values = _parameterize(parts, placeholder)
+        if sql is not None and values and sql == query.value:
+            return len(params.elts) == len(values) and all(
+                ast.dump(a) == ast.dump(b) for a, b in zip(params.elts, values, strict=True)
+            )
+    return False
 
 
 def _dotted(expr: ast.AST) -> set[str]:

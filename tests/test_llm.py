@@ -423,6 +423,9 @@ def test_flagged_call_field_is_redacted(tmp_path):
         "subprocess.run(['grep', '-r', pattern, '/'])",
         "subprocess.run(['grep', '-r', '--include=*', pattern, '.'])",
         "subprocess.run([*pattern.split()])",
+        # Codex verify round: an extra computed argument adds an operation
+        "subprocess.run(['grep', '-r', pattern, '.', '-l'.upper()])",
+        "subprocess.run(['grep', '-r', pattern, '.'], cwd='/')",
     ],
 )
 def test_implausible_llm_fixes_are_rejected(tmp_path, fixed):
@@ -445,7 +448,8 @@ SQL = "def get(cur, uid):\n    cur.execute(f\"SELECT name FROM users WHERE id = 
     ("fixed", "kept"),
     [
         ("cur.execute('SELECT name FROM users WHERE id = ?', (uid,))", True),
-        ("cur.execute('select name from users where id = %s', [uid])", True),
+        ("cur.execute('SELECT name FROM users WHERE id = %s', [uid])", True),
+        ("cur.execute('select name from users where id = %s', [uid])", False),  # not exact
         ("cur.execute('DELETE FROM users WHERE id = ?', (uid,))", False),
         ("cur.execute('SELECT name FROM users WHERE id = ? OR 1=1', (uid,))", False),
         ("cur.execute('SELECT password FROM users WHERE id = ?', (uid,))", False),
@@ -455,6 +459,31 @@ SQL = "def get(cur, uid):\n    cur.execute(f\"SELECT name FROM users WHERE id = 
 def test_llm_sql_fix_must_keep_the_query(tmp_path, fixed, kept):
     (f,) = run(tmp_path, SQL, FakeOllama(answer("true_positive", fixed=fixed))).findings
     assert (f.fix is not None) is kept
+
+
+def test_llm_sql_fix_keeps_parameter_order(tmp_path):
+    code = (
+        "def get(cur, uid, tenant):\n"
+        '    cur.execute(f"SELECT name FROM users WHERE tenant = {tenant} AND id = {uid}")\n'
+    )
+    good = "cur.execute('SELECT name FROM users WHERE tenant = ? AND id = ?', (tenant, uid))"
+    swapped = "cur.execute('SELECT name FROM users WHERE tenant = ? AND id = ?', (uid, tenant))"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=good))).findings
+    assert f.fix is not None
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=swapped))).findings
+    assert f.fix is None
+
+
+def test_llm_sql_fix_cannot_comment_out_conditions(tmp_path):
+    # `--` inside the original makes the rest of that line a comment; the LLM moved the
+    # tenant check onto the commented line. SQL with comments gets no fix at all.
+    code = (
+        "def get(cur, uid):\n"
+        '    cur.execute(f"SELECT name FROM users WHERE id = {uid} --\\n AND tenant_id = 1")\n'
+    )
+    fixed = "cur.execute('SELECT name FROM users WHERE id = ? -- AND tenant_id = 1', (uid,))"
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert f.fix is None
 
 
 @pytest.mark.parametrize(
