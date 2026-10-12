@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import difflib
 import re
+import string
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -157,7 +158,7 @@ def _sqli(call: ast.Call, ctx: FileContext):
     placeholder = _placeholder(ctx)
     if placeholder is None:
         return None
-    parts = _sql_parts(call.args[0])
+    parts = _sql_parts(call.args[0], sql=True)
     if parts is None or not any(isinstance(p, ast.AST) for p in parts):
         return None
     sql, params = _parameterize(parts, placeholder)
@@ -193,8 +194,13 @@ def _placeholder(ctx: FileContext) -> str | None:
     return "?" if qmark else "%s"
 
 
-def _sql_parts(expr: ast.AST) -> list[str | ast.AST] | None:
-    """Literal text and value expressions, in order, for f-strings, `+` and `%`."""
+def _sql_parts(expr: ast.AST, *, sql: bool = False) -> list[str | ast.AST] | None:
+    """Literal text and value expressions, in order, for f-strings, `+` and `%`.
+
+    `sql=True` also decomposes `"...".format(...)`. A bound SQL value skips the text conversion
+    (`__format__("")` for `{}`, like `__str__` for `%s` and f-strings) and keeps its type, as the
+    SQL fix description already says. Command argv must stay text, so `_argv` never uses it
+    (`"cmd {}".format(1)` would become a non-str argument and crash)."""
     if isinstance(expr, ast.JoinedStr):
         parts: list[str | ast.AST] = []
         for v in expr.values:
@@ -210,7 +216,7 @@ def _sql_parts(expr: ast.AST) -> list[str | ast.AST] | None:
                 return None
         return parts
     if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
-        left, right = _operand(expr.left), _operand(expr.right)
+        left, right = _operand(expr.left, sql=sql), _operand(expr.right, sql=sql)
         if left is None or right is None:
             return None
         return [*left, *right]
@@ -230,17 +236,49 @@ def _sql_parts(expr: ast.AST) -> list[str | ast.AST] | None:
             else:
                 out.append(values[i // 2])
         return out
+    if (
+        sql
+        and isinstance(expr, ast.Call)
+        and isinstance(expr.func, ast.Attribute)
+        and expr.func.attr == "format"
+        and isinstance(expr.func.value, ast.Constant)
+        and isinstance(expr.func.value.value, str)
+        and not expr.keywords
+        and not any(isinstance(a, ast.Starred) for a in expr.args)
+    ):
+        return _format_parts(expr.func.value.value, expr.args)
     if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
         return [expr.value]
     return None
 
 
-def _operand(expr: ast.AST) -> list[str | ast.AST] | None:
+def _format_parts(template: str, values: list[ast.AST]) -> list[str | ast.AST] | None:
+    """`"...{}...".format(a, b)`: only auto-numbered `{}` fields without a conversion or
+    format spec, each argument used exactly once in order. Each field calls the value's
+    `__format__("")`, which usually equals `str()` (as `%s` does) but a custom type may differ."""
+    try:
+        fields = list(string.Formatter().parse(template))
+    except ValueError:
+        return None
+    out: list[str | ast.AST] = []
+    used = 0
+    for literal, name, spec, conversion in fields:
+        out.append(literal)
+        if name is None:
+            continue
+        if name != "" or spec or conversion is not None or used >= len(values):
+            return None
+        out.append(values[used])
+        used += 1
+    return out if used == len(values) else None
+
+
+def _operand(expr: ast.AST, *, sql: bool = False) -> list[str | ast.AST] | None:
     """An operand of `+`: string-building expressions decompose, anything else is a value."""
     if isinstance(expr, (ast.JoinedStr, ast.BinOp)) or (
         isinstance(expr, ast.Constant) and isinstance(expr.value, str)
     ):
-        return _sql_parts(expr)
+        return _sql_parts(expr, sql=sql)
     if isinstance(expr, ast.Constant):
         return None  # e.g. "id = " + 5: not a str concatenation
     return [expr]

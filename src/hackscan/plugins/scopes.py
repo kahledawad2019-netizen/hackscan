@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
@@ -186,8 +187,16 @@ class ScopeIndex:
         for name in replacement_names - original_names:
             if not self._safe_fix_name(name, original, imports):
                 return False
+        # A call copied verbatim from the original (a value such as `params.get("id")`) is
+        # not introduced: same callee, same scope. Count copies so none can be duplicated.
+        copied = Counter(
+            ast.dump(n) for n in ast.walk(original) if isinstance(n, ast.Call) and n is not original
+        )
         for node in ast.walk(replacement):
             if not isinstance(node, ast.Call):
+                continue
+            if node is not replacement and copied[ast.dump(node)] > 0:
+                copied[ast.dump(node)] -= 1
                 continue
             # SQL fixes keep the original receiver; it can be a local cursor.
             if (

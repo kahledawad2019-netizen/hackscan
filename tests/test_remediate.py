@@ -75,6 +75,91 @@ def test_sqli_forms(tmp_path: Path, query: str, expected: str):
     assert expected in new
 
 
+def test_sqli_str_format_becomes_parameterized_and_is_safe(tmp_path: Path):
+    _, new = fixed_source(
+        tmp_path,
+        """
+        import sqlite3
+
+        def login(cur, user, pw):
+            return cur.execute(
+                "SELECT id FROM users WHERE name = '{}' AND pw = '{}'".format(user, pw)
+            ).fetchall()
+        """,
+    )
+    assert "WHERE name = ? AND pw = ?', (user, pw))" in new
+    namespace: dict = {}
+    exec(compile(new, "m.py", "exec"), namespace)
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE users (id INTEGER, name TEXT, pw TEXT)")
+    db.execute("INSERT INTO users VALUES (1, 'alice', 's3')")
+    cur = db.cursor()
+    assert namespace["login"](cur, "alice", "s3") == [(1,)]
+    assert namespace["login"](cur, "alice", "x' OR '1'='1") == []
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "\"SELECT * FROM t WHERE a = '{0}'\".format(x)",  # numbered field
+        "\"SELECT * FROM t WHERE a = '{a}'\".format(a=x)",  # named field / keyword
+        "\"SELECT * FROM t WHERE a = '{!r}'\".format(x)",  # conversion
+        "\"SELECT * FROM t WHERE a = '{:>5}'\".format(x)",  # format spec
+        "\"SELECT * FROM t WHERE a = '{}'\".format(x, y)",  # unused argument
+        "\"SELECT * FROM t WHERE a = '{}'\".format(x, extra=y)",  # unused keyword is still evaluated
+        "\"SELECT * FROM t WHERE a = '{}' AND b = '{}'\".format(*x)",  # starred
+        "\"SELECT * FROM t WHERE a = '{}'\".format",  # not a call of the template
+    ],
+)
+def test_sqli_str_format_refuses_non_plain_fields(tmp_path: Path, query: str):
+    _, findings = fixes_for(
+        tmp_path, f"import sqlite3\n\ndef f(cur, x, y):\n    cur.execute({query})\n"
+    )
+    assert all(f.fix is None for f in findings)
+
+
+def test_sqli_values_with_calls_are_copied_verbatim(tmp_path: Path):
+    _, new = fixed_source(
+        tmp_path,
+        """
+        import re
+        import sqlite3
+
+        def login(cur, params):
+            cur.execute(
+                "SELECT * FROM users WHERE name='" + re.sub(r"[^a-z]", "", params.get("name", ""))
+                + "' AND pw='" + params.get("pw", "") + "'"
+            )
+        """,
+    )
+    assert (
+        "'SELECT * FROM users WHERE name=? AND pw=?', "
+        '(re.sub(r"[^a-z]", "", params.get("name", "")), params.get("pw", "")))' in new
+    )
+
+
+def test_copied_calls_cannot_be_duplicated_or_invented():
+    from hackscan.plugins.base import FileContext
+
+    source = "import sqlite3\n\ndef f(cur, g):\n    cur.execute('SELECT ' + g())\n"
+    tree = ast.parse(source)
+    ctx = FileContext("m.py", source, tree)
+    (call,) = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "execute"
+    ]
+
+    def ok(replacement: str) -> bool:
+        return ctx.scopes.safe_introduced_names(
+            call, ast.parse(replacement, mode="eval").body, sql_receiver=True
+        )
+
+    assert ok("cur.execute('SELECT ?', (g(),))")
+    assert not ok("cur.execute('SELECT ?, ?', (g(), g()))")  # a second evaluation is new code
+    assert not ok("cur.execute('SELECT ?', (h(),))")  # a call the original never made
+
+
 def test_sqli_psycopg_uses_format_placeholders(tmp_path: Path):
     _, new = fixed_source(
         tmp_path,
@@ -307,6 +392,19 @@ def test_os_system_percent_conversion_fix(tmp_path: Path, conversion: str, has_f
     assert bool(fixes) is has_fix
     if has_fix:
         assert "subprocess.call(['ls', str(n)])" in apply_edits(source, fixes[0].edits)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        'subprocess.run("whoami {}".format(n), shell=True, capture_output=True)',
+        'os.system("whoami {}".format(n))',
+    ],
+)
+def test_command_str_format_has_no_template_fix(tmp_path: Path, call: str):
+    # argv must stay text: "whoami {}".format(123) works, ["whoami", 123] raises TypeError.
+    _, findings = fixes_for(tmp_path, f"import os\nimport subprocess\n\ndef f(n):\n    {call}\n")
+    assert findings and all(f.fix is None for f in findings)
 
 
 def test_shell_true_drops_shell(tmp_path: Path):

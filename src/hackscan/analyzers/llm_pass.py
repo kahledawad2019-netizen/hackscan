@@ -779,7 +779,7 @@ def _same_sql(original: ast.Call, new: ast.Call, ctx: FileContext) -> bool:
         return False
     if not isinstance(params, (ast.Tuple, ast.List)):
         return False
-    parts = _sql_parts(original.args[0])
+    parts = _sql_parts(original.args[0], sql=True)
     if parts is None:
         return False
     # The placeholder style must be the one the file's driver uses (`?` breaks psycopg);
