@@ -452,3 +452,10 @@ hackscan/
   re-run so the HackScan rows show 0.3.0 (numbers unchanged). Next ideas (not started):
   weak-cipher detection (DES/RC4/ECB/unauthenticated modes; largest benchmark gap),
   taint through `self` attributes, further pass-2 aliasing hardening.
+- 2026-10-12 (v0.3.1): template fixes only, found by the security agent's held-out evaluation
+  (8 of 13 true findings had no template). A call copied verbatim from the original call
+  (`params.get("id")`, `re.sub(...)`) no longer counts as introduced code (multiset count, so
+  no duplication); SQL fixes now decompose `"...'{}'...".format(args)` (plain auto-numbered
+  fields, positional args used exactly once; never for command argv, where a non-str value would
+  crash). Detection is unchanged, so the benchmark tables still show the 0.3.0 measurement (Bandit,
+  Semgrep and CodeQL are not installed on the release machine to re-run every row).
