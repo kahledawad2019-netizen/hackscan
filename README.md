@@ -221,7 +221,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: kahledawad2019-netizen/hackscan@v0.3.1
+      - uses: kahledawad2019-netizen/hackscan@v0.3.2
         with:
           path: src
           fail-on: high
@@ -253,7 +253,7 @@ Python 3.12 on the runner. Without the action:
 ```yaml
 repos:
   - repo: https://github.com/kahledawad2019-netizen/hackscan
-    rev: v0.3.1
+    rev: v0.3.2
     hooks:
       - id: hackscan
 ```

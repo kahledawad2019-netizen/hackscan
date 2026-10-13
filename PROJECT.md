@@ -459,7 +459,7 @@ hackscan/
   fields, positional args used exactly once; never for command argv, where a non-str value would
   crash). Detection is unchanged, so the benchmark tables still show the 0.3.0 measurement (Bandit,
   Semgrep and CodeQL are not installed on the release machine to re-run every row).
-- 2026-10-13 (unreleased, 0.3.2 candidate): soundness fixes found while reviewing an attempt to credit
+- 2026-10-13 (v0.3.2): soundness fixes found while reviewing an attempt to credit
   datasette's `escape_sqlite` as an SQL identifier sanitizer. That attempt was dropped (Claude + Codex,
   user-confirmed): the helper leaves words missing from its own reserved list bare (`returning`, `true`),
   so it is no sound sanitizer. The review rounds instead found sanitizer-credit bugs that shipped in 0.3.1,
@@ -479,8 +479,10 @@ hackscan/
   `taint/sanitizers.py`, plus `echo`, minus `printf`: bash's builtin evaluates a `-v` variable name)
   and no shell syntax that starts or groups commands (user choice: allow-list, not a denylist of code
   runners), and a sink that cannot pick another shell (`executable=`, Popen's positional executable,
-  `**` options). User decisions: in-file sanitizer replacement beyond
-  the simple checks, credit inherited across calls (missed confirmations only) and
-  numbers/constants shaping SQL text structure (sign next to
-  `-`, runtime repetition) are documented README limitations (the last pinned by strict-xfail tests).
-  Held-out eval and benchmark numbers unchanged.
+  `**` options). User decisions: in-file sanitizer replacement beyond the simple checks, credit
+  inherited across calls (missed confirmations only) and numbers/constants shaping SQL text
+  structure (sign next to `-`, runtime repetition) are documented README limitations (the last
+  pinned by strict-xfail tests). Codex review: 13 rounds, final "HS OK". The security agent's
+  held-out eval is identical to 0.3.1 on every finding, and the benchmark's HackScan numbers are
+  unchanged (`test_published_hackscan_numbers_are_current`), so the tables keep the 0.3.0
+  measurement (Bandit, Semgrep and CodeQL are not installed here to re-run every row).
