@@ -24,6 +24,7 @@ from hackscan.core.taxonomy import CMDI, CODEI, SQLI, WEAK_CRYPTO
 from hackscan.importers.common import SourceIndex
 from hackscan.plugins.base import FileContext, first_arg, keyword
 from hackscan.plugins.loader import builtin_plugins
+from hackscan.taint.sanitizers import INERT_PROGRAMS, program_name
 
 PRODUCER = "template"
 
@@ -474,23 +475,7 @@ def _argv(expr: ast.AST, ctx: FileContext) -> list[str] | None:
     return argv
 
 
-# Programs whose arguments are data: no option or operand runs a command, loads code or
-# writes an arbitrary file. An argument list only makes a dynamic value safe for these;
-# countless others execute operands or options (`sh -c`, `npx PKG`, `git -c alias=!cmd`,
-# `tar --to-command`, `sort --compress-program`, `find -exec`, `rg --pre`), so an
-# allowlist, not a denylist.
-INERT_PROGRAMS = {
-    "printf", "cat", "tac", "nl", "ls", "head", "tail", "wc", "cut",
-    "grep", "egrep", "fgrep", "file", "stat", "du", "df", "basename", "dirname",
-    "realpath", "readlink", "which", "whoami", "id", "ping", "host", "dig", "nslookup",
-}  # fmt: skip
-
-
-def program_name(literal: str) -> str:
-    """`/bin/grep` or `C:\\Tools\\grep.exe` -> `grep`. Only `.exe` is dropped: `.bat` and
-    `.cmd` files run through cmd.exe, which re-parses the arguments."""
-    name = literal.replace("\\", "/").rsplit("/", 1)[-1].lower()
-    return name[: -len(".exe")] if name.endswith(".exe") else name
+# INERT_PROGRAMS / program_name: see hackscan.taint.sanitizers (shared with taint_pass).
 
 
 def _argv_is_inert(words: list[str | None]) -> bool:

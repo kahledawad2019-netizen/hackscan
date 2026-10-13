@@ -176,7 +176,13 @@ HackScan's authors, so treat both tables as a sanity check rather than a ranking
 
 Sanitizers recognized: numeric/UUID conversions (all classes), `psycopg` `sql.Identifier`
 /`sql.Literal` (SQL). `shlex.quote` is POSIX-only, so quoted commands are kept as
-low-confidence candidates rather than suppressed.
+low-confidence candidates rather than suppressed. That verdict needs the command to start with
+a literal name from the same list of inert programs that command fixes use (plus `echo`, but
+not `printf`, whose shell builtin can evaluate a variable name; not `sh -c`, `ssh`, `xargs`,
+`tar`, interpreters, ...) and command text without shell syntax that starts or groups commands
+(`;`, `|`, `&`, `$(...)`, redirections, braces): a quoted value in the program position, or a
+program name assembled at runtime, gets none; nor does a call that may pick another shell
+(`executable=`, options passed with `**`).
 
 ### Custom rules
 
@@ -272,15 +278,30 @@ apply as usual.
   confirmed or left as candidates: an assignment expression can rebind a name in the
   middle of an expression, which the statement-level analysis does not order. Sinks in
   the body of a generator expression are never suppressed either (it runs later), nor
-  are values produced by one. Module-level constants are trusted only when bound exactly
-  once and the module never writes its namespace dynamically (`globals()`, `vars()`,
-  `exec`, `eval`, `__dict__`, star imports); `global`/`nonlocal` names are never trusted.
+  are values produced by one, except by a generator that `str.join` consumes right away.
+  Module-level constants are trusted only when bound exactly once and the module never
+  writes its namespace dynamically (`globals()`, `vars()`, `exec`, `eval`, `__dict__`,
+  star imports); `global`/`nonlocal` names are never trusted.
 - Mutable objects (lists, dicts, sets) are tracked by variable name. Mutation through
   direct aliases, method calls (`d.get(k).append(x)`), bound methods
   (`add = parts.append`), conditional receivers and comprehension items is modeled;
   aliases created in less direct ways (stored in another object's attribute or in a
   container and mutated through it later, returned from a helper, reached through
   `getattr`) may be missed, so a constant suppression involving such code deserves review.
+- A sanitizer counts only through a name that cannot be something else in the same file:
+  one import or definition, no assignment to an attribute of that name, no `setattr` /
+  `delattr`. Replacing a sanitizer at runtime in other ways (from another file, or in the
+  same file through an alias of `setattr`, `__setattr__`, `__dict__` writes and the like)
+  is not modeled.
+- Sanitizer credit computed in one function is reused by its callers and callees, so a
+  transformation in another function that undoes it (slicing a shell-quoted argument,
+  for example) can leave such a finding a candidate instead of confirming it.
+- Numbers from `int()`, `float()`, `len()` and similar count as safe in SQL text, and SQL
+  token boundaries are not modeled: text whose structure a runtime number decides is not
+  detected, such as a `-` right before a possibly negative number (`"n -" + str(int(x))`
+  can form a `--` comment), a fragment repeated a runtime number of times (`"-" * int(x)`),
+  or a separator repeated between a runtime number of items. Bound query parameters avoid
+  all of these.
 - Python only. Imported tools may cover other languages; their findings are passed through.
 - Fix suggestions are deliberately conservative: many vulnerable lines get none. Command
   fixes (argument lists) are only offered for programs whose arguments are inert data

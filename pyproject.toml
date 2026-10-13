@@ -67,3 +67,4 @@ Issues = "https://github.com/kahledawad2019-netizen/hackscan/issues"
 "tests/test_remediate.py" = ["E501"]
 "tests/test_llm.py" = ["E501"]
 "tests/test_ui.py" = ["E501"]
+"tests/test_quoting_credit.py" = ["E501"]

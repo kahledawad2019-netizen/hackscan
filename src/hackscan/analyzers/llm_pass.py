@@ -386,6 +386,7 @@ def verify_evidence(ctx: FileContext, finding: Finding, line: int, kind: str) ->
             _is_constant_value(stmt.value)
             if kind == "constant"
             else _is_class_sanitizer(stmt.value, ctx, finding.vuln_class)
+            and _credit_reaches_sink(ctx, func, stmt, call, finding.vuln_class)
         )
         covered = {target.id}
     elif kind == "guard":
@@ -402,6 +403,21 @@ def verify_evidence(ctx: FileContext, finding: Finding, line: int, kind: str) ->
     else:
         return False
     return ok and not _rebound_after(func, covered, stmt)
+
+
+def _credit_reaches_sink(
+    ctx: FileContext, func: ast.AST, stmt: ast.Assign, call: ast.Call, vuln_class: str
+) -> bool:
+    """Whether the cited sanitizer's credit survives the sink's use of the value, by the
+    taint engine's own rules (`"%c" % n` or an f-string of a psycopg object drop it)."""
+    from hackscan.analyzers.taint_pass import _FileEngine, _FunctionEngine, combine, source
+
+    engine = _FunctionEngine(_FileEngine(ctx, {}), func, frozenset())
+    name = stmt.targets[0].id  # type: ignore[attr-defined]
+    value = engine.eval(stmt.value, {name: source("untrusted input", stmt)})
+    args = [*call.args, *(k.value for k in call.keywords)]
+    result = combine(engine.eval(a, {name: value}) for a in args)
+    return vuln_class in result.safe_for
 
 
 def _sink_value_names(call: ast.Call) -> set[str] | None:
@@ -500,10 +516,13 @@ def _is_constant_value(expr: ast.AST) -> bool:
 
 
 def _is_class_sanitizer(expr: ast.AST, ctx: FileContext, vuln_class: str) -> bool:
+    from hackscan.analyzers.taint_pass import _FileEngine
     from hackscan.taint.sanitizers import QUOTING_SANITIZERS, SANITIZERS
 
     if not isinstance(expr, ast.Call):
         return False
+    if not _FileEngine(ctx, {}).stable_callee(expr):
+        return False  # `int = ...` / `uuid.UUID = ...` elsewhere: the call may be another
     return any(
         vuln_class in SANITIZERS.get(name, frozenset()) and name not in QUOTING_SANITIZERS
         for name in ctx.call_names(expr)

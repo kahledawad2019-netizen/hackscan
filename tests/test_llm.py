@@ -303,6 +303,18 @@ def test_verify_evidence_accepts(tmp_path, body, line, kind):
         ("    if cmd not in extra:\n        return\n", 4, "guard"),
         # sanitizer not valid for command injection (POSIX-only quoting)
         ("    cmd = shlex.quote(cmd)\n", 4, "sanitizer"),
+        # the sanitizer name is rebound in that scope
+        (
+            "    from builtins import int\n    int = lambda s: s\n    cmd = int(cmd)\n",
+            6,
+            "sanitizer",
+        ),
+        # the sanitizer is a module attribute that this file replaces
+        (
+            "    import uuid\n    uuid.UUID = lambda s: s\n    cmd = uuid.UUID(cmd)\n",
+            6,
+            "sanitizer",
+        ),
         # wrong kind for the statement / line after the sink / nonexistent line
         ('    cmd = "ls"\n', 4, "guard"),
         ("    pass\n", 6, "constant"),
@@ -334,6 +346,43 @@ def test_codei_allow_list_rejects_dunder_name(tmp_path):
     ctx, _ = index.context("m.py")
     (finding,) = [f for f in findings if f.vuln_class == "codei"]
     assert not verify_evidence(ctx, finding, 2, "guard")
+
+
+@pytest.mark.parametrize(
+    ("assign", "sink", "accepted"),
+    [
+        ("x = int(x)", 'cur.execute("select %d" % x)', True),
+        ("x = int(x)", 'cur.execute(f"select {x}")', True),
+        ("x = int(x)", 'cur.execute("select %c" % x)', False),
+        ("x = int(x)", 'cur.execute(f"select {x:c}")', False),
+        ("x = sql.Identifier(x)", "cur.execute(x)", True),
+        ("x = sql.Identifier(x)", 'cur.execute(f"select {x}")', False),
+        ("x = sql.Literal(x)", 'cur.execute("select %s" % x)', False),
+        ("x = abs(x)", "cur.execute(x)", False),
+    ],
+)
+def test_llm_sanitizer_evidence_follows_the_engine(tmp_path, assign, sink, accepted):
+    # The cited sanitizer's credit must survive the sink's use of the value, by the taint
+    # engine's own rules: character conversion and rendering a SQL object drop it.
+    code = f"from psycopg2 import sql\n\ndef run(cur, x):\n    {assign}\n    {sink}\n"
+    findings, index = setup(tmp_path, code)
+    ctx, _ = index.context("m.py")
+    (finding,) = [f for f in findings if f.vuln_class == "sqli"]
+    assert verify_evidence(ctx, finding, 4, "sanitizer") is accepted
+
+
+@pytest.mark.parametrize(("helper", "accepted"), [("escape_sqlite", False), ("int", True)])
+def test_identifier_quoting_is_not_llm_sanitizer_evidence(tmp_path, helper, accepted):
+    # Identifier quoting is safe only in some surrounding SQL text (a quoted identifier
+    # inside a string literal can inject), which a single evidence line cannot show.
+    code = (
+        "from datasette.utils import escape_sqlite\n\n"
+        f"def run(cur, x):\n    x = {helper}(x)\n    cur.execute(x)\n"
+    )
+    findings, index = setup(tmp_path, code)
+    ctx, _ = index.context("m.py")
+    (finding,) = [f for f in findings if f.vuln_class == "sqli"]
+    assert verify_evidence(ctx, finding, 4, "sanitizer") is accepted
 
 
 def test_shell_metacharacter_allow_list_cannot_suppress(tmp_path):

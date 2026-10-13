@@ -459,3 +459,28 @@ hackscan/
   fields, positional args used exactly once; never for command argv, where a non-str value would
   crash). Detection is unchanged, so the benchmark tables still show the 0.3.0 measurement (Bandit,
   Semgrep and CodeQL are not installed on the release machine to re-run every row).
+- 2026-10-13 (unreleased, 0.3.2 candidate): soundness fixes found while reviewing an attempt to credit
+  datasette's `escape_sqlite` as an SQL identifier sanitizer. That attempt was dropped (Claude + Codex,
+  user-confirmed): the helper leaves words missing from its own reserved list bare (`returning`, `true`),
+  so it is no sound sanitizer. The review rounds instead found sanitizer-credit bugs that shipped in 0.3.1,
+  fixed here (tests/test_quoting_credit.py): shell-quoting credit is allow-listed (it survives only whole
+  insertion into plain text; containers, iteration, unpacking, indexing, methods, `!r`/padding, `%c`,
+  bytes and decoding drop it); text that may render quotes (bytes, containers, attributes, method results,
+  repr-like builtins, sliced quoting output, backslashes) is not quote-free; sanitizer names must be
+  stable (one binding, no attribute assignment, no `setattr`) in taint and LLM evidence; number credit
+  does not survive conversion to characters (methods other than case/strip/zfill, `%c`/`{:c}`, fill
+  specs, unknown templates, `format`/`bytes`/`bytearray`) or attribute access (`uuid.UUID(x).bytes`);
+  psycopg `sql.Identifier`/`sql.Literal` keep credit only while passed on as is (also not across calls);
+  `.format` field selectors and `*args`/`**kwargs` mappings; constant text indexed at runtime is no
+  constant; iteration items are no containers; `abs`/`round` pass their argument's credit through
+  (their dunders may return anything) instead of sanitizing; LLM sanitizer evidence is checked with the
+  taint engine itself (the credit must survive the sink's use of the value); the POSIX quoting verdict
+  needs the command to start with a literal inert program (the fix generator's list, now shared in
+  `taint/sanitizers.py`, plus `echo`, minus `printf`: bash's builtin evaluates a `-v` variable name)
+  and no shell syntax that starts or groups commands (user choice: allow-list, not a denylist of code
+  runners), and a sink that cannot pick another shell (`executable=`, Popen's positional executable,
+  `**` options). User decisions: in-file sanitizer replacement beyond
+  the simple checks, credit inherited across calls (missed confirmations only) and
+  numbers/constants shaping SQL text structure (sign next to
+  `-`, runtime repetition) are documented README limitations (the last pinned by strict-xfail tests).
+  Held-out eval and benchmark numbers unchanged.

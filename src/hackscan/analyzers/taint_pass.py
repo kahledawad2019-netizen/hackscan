@@ -22,6 +22,8 @@ behind the analysis' back, so it is joined with `unknown` at that point.
 from __future__ import annotations
 
 import ast
+import re
+import string
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 
@@ -42,7 +44,13 @@ from hackscan.core.models import Evidence, Finding, Status
 from hackscan.core.taxonomy import CMDI, TAINT_CLASSES
 from hackscan.plugins.base import FileContext, Match
 from hackscan.plugins.scopes import COMPREHENSION_TYPES, FUNCTION_TYPES
-from hackscan.taint.sanitizers import QUOTING_SANITIZERS, SANITIZERS
+from hackscan.taint.sanitizers import (
+    INERT_PROGRAMS,
+    NUMERIC_SANITIZERS,
+    QUOTING_SANITIZERS,
+    SANITIZERS,
+    SQL_OBJECT_SANITIZERS,
+)
 from hackscan.taint.sources import (
     REQUEST_PARAM_ATTRS,
     REQUEST_PARAM_NAMES,
@@ -88,6 +96,8 @@ NON_ESCAPING_CALLS = frozenset(
     }
 )
 # Builtins whose result is derived only from their arguments.
+# Pure builtins returning a new string.
+STR_BUILTINS = frozenset({"str", "repr", "format", "ascii"})
 PURE_BUILTINS = frozenset(
     {"str", "repr", "format", "ascii", "bytes", "tuple", "sorted", "frozenset"}
 )
@@ -122,11 +132,44 @@ STRING_METHODS = frozenset(
 )
 # String-building methods whose receiver is a template (quote context applies).
 TEMPLATE_METHODS = frozenset({"join", "format", "format_map"})
+# String methods that only change letter case or remove characters: a sanitized value's
+# characters stay in its safe set (the sanitizers are numeric conversions, quoting helpers
+# whose credit `unquote` already drops, and psycopg objects). Others (`replace`,
+# `translate`, `decode`, `split`, ...) may produce arbitrary characters.
+CREDIT_KEEPING_METHODS = frozenset(
+    {
+        "lower",
+        "upper",
+        "casefold",
+        "title",
+        "capitalize",
+        "swapcase",
+        "strip",
+        "lstrip",
+        "rstrip",
+        "zfill",
+    }
+)
+# Numeric builtins that return whatever `__abs__` / `__round__` returns.
+NUMERIC_PASSTHROUGH = frozenset({"abs", "round", "builtins.abs", "builtins.round"})
+# Pure builtins returning a container of the argument's elements.
+CONTAINER_BUILTINS = frozenset({"tuple", "sorted", "frozenset"})
+# Builtins that make characters out of numbers: `format(65, "c")`, `bytes([65])`.
+CHAR_BUILTINS = frozenset({"format", "bytes", "bytearray"})
 # Methods on a mutable receiver known not to modify it.
 READONLY_METHODS = frozenset(
     {"count", "index", "copy", "get", "keys", "values", "items", "__len__", "__contains__"}
 )
-SHELL_QUOTE_CHARS = frozenset("'\"`")
+# Text that changes how a quoted value is read: quotes and a backslash (a larger quoted
+# word, an escaped quote) and shell syntax that starts another command or groups words
+# (`;`, `|`, `&`, `$(...)`, redirections, braces, newlines). (A glob, `~` or `#` in an
+# argument cannot make the quoted value code; a glob program word is no inert name.)
+SHELL_META_CHARS = frozenset("'\"`\\;|&$()<>{}^\n\r")
+# Programs a shell-quoted operand of which stays data (`echo` too: it only prints). Not
+# `printf`: the shell builtin (bash) evaluates an array subscript in a `-v` variable name.
+QUOTING_INERT_PROGRAMS = frozenset((INERT_PROGRAMS - {"printf"}) | {"echo"})
+# printf-style conversions; only plain `%s` (and `%%`) insert a quoted value as is.
+PRINTF_SPEC = re.compile(r"%(?:\([^)]*\))?[#0\- +]*(?:\*|\d+)?(?:\.(?:\*|\d+))?[hlL]?(.)", re.S)
 
 
 @dataclass(frozen=True, order=True)
@@ -152,6 +195,17 @@ class Taint:
     # They never affect the verdict of this pass.
     symbols: frozenset[SymbolPair] = frozenset()
 
+    # A SQL object (SQL_OBJECT_SANITIZERS): its credit holds only for the object itself.
+    sql_object: bool = False
+    # A list/tuple/set/dict: indexing selects one whole element (not characters of a text).
+    container: bool = False
+    # A number (numeric literal, numeric sanitizer, arithmetic of numbers): `%` is modulo.
+    number: bool = False
+    # The (command) text starts with a complete program word, written as a literal, that does
+    # not run its operands or input as code (see `starts_with_program`). Shell-quoting credit
+    # needs it: a quoted value in the program position is the program itself.
+    program_start: bool = False
+
     @property
     def is_constant(self) -> bool:
         return not self.sources and not self.unknown
@@ -165,8 +219,9 @@ def combine(values: Iterable[Taint]) -> Taint:
     """Value derived from all of `values` (also the join of alternative paths)."""
     sources: set[Source] = set()
     symbols: set[SymbolPair] = set()
-    unknown = mutable = quote_sanitized = False
-    shell_plain = True
+    unknown = mutable = quote_sanitized = sql_object = False
+    shell_plain = container = number = program_start = True
+    count = 0
     safe = set(TAINT_CLASSES)
     for v in values:
         sources |= v.sources
@@ -176,6 +231,11 @@ def combine(values: Iterable[Taint]) -> Taint:
         mutable = mutable or v.mutable
         shell_plain = shell_plain and v.shell_plain
         quote_sanitized = quote_sanitized or v.quote_sanitized
+        sql_object = sql_object or v.sql_object
+        container = container and v.container
+        number = number and v.number
+        program_start = program_start and v.program_start
+        count += 1
     return Taint(
         frozenset(sources),
         unknown,
@@ -184,6 +244,10 @@ def combine(values: Iterable[Taint]) -> Taint:
         shell_plain,
         quote_sanitized,
         frozenset(symbols),
+        sql_object=sql_object,
+        container=container and count > 0,
+        number=number and count > 0,
+        program_start=program_start and count > 0,
     )
 
 
@@ -209,7 +273,57 @@ def concat(values: list[Taint]) -> Taint:
     if not result.shell_plain and any(v.quote_sanitized for v in values):
         result = replace(result, safe_for=result.safe_for - {CMDI})
         result = _unsafe_symbols(result, frozenset({CMDI}))
-    return replace(result, mutable=False)
+    # (`+` of numbers is arithmetic: still a number)
+    number = bool(values) and all(v.number for v in values)
+    program_start = bool(values) and values[0].program_start  # the command's first word
+    return replace(
+        result, mutable=False, container=False, number=number, program_start=program_start
+    )
+
+
+def known(value: Taint) -> bool:
+    """A constant with no symbolic parts: the same text on every run."""
+    return value.is_constant and not value.symbols
+
+
+# Characters of a literal program word: no whitespace, shell syntax, assignment (`FOO=x`),
+# placeholder (`%s`, `{}`, a `.format` field's `\0`), quote or glob.
+PROGRAM_CHARS = r"[^ \t\n\r;&|<>()$`'\"\\=%{}*?\[\]~!#^\0]+"
+# The first word of a command when it is complete within the text: POSIX shells separate
+# words by blanks (space, tab) only; other whitespace (`\v`, `\f`, NBSP) is part of a word.
+PROGRAM_WORD = re.compile(rf"[ \t]*({PROGRAM_CHARS})[ \t]")
+# Directories of the system programs the inert list names (elsewhere, `./ls` or `/opt/x/ls`
+# may be any program).
+SYSTEM_BIN_DIRS = frozenset(
+    {"/bin", "/usr/bin", "/usr/local/bin", "/sbin", "/usr/sbin", "/usr/local/sbin"}
+)
+
+
+def inert_program(word: str) -> bool:
+    """A literal program word naming a listed inert program exactly (POSIX names are case
+    sensitive): a bare name, or one in a system bin directory."""
+    if "\\" in word:
+        return False
+    directory, slash, name = word.rpartition("/")
+    if slash and directory not in SYSTEM_BIN_DIRS:
+        return False
+    return name in QUOTING_INERT_PROGRAMS
+
+
+def starts_with_program(text: str) -> bool:
+    """Whether `text` starts with a complete program word naming a known inert program
+    (`echo `, `/bin/ls -l `; not `sh -c `, `chrt `, `pyth` + `on3`, `%s `, `./ls `)."""
+    m = PROGRAM_WORD.match(text)
+    return m is not None and inert_program(m.group(1))
+
+
+def item_of(value: Taint) -> Taint:
+    """An item of an iterable (a character of a string, an element of a container): not the
+    quoted whole, and not itself known to be a container. Only a container's elements
+    (whole literals) keep the program flag; a character names no program."""
+    return replace(
+        unquote(value), container=False, program_start=value.program_start and value.container
+    )
 
 
 def unquote(value: Taint) -> Taint:
@@ -218,14 +332,92 @@ def unquote(value: Taint) -> Taint:
     if not value.quote_sanitized:
         return value
     value = _unsafe_symbols(value, frozenset({CMDI}))
-    return replace(value, safe_for=value.safe_for - {CMDI}, quote_sanitized=False)
+    # Its text holds quotes that may now be unbalanced (`shlex.quote("")[0]` is `'`).
+    return replace(
+        value, safe_for=value.safe_for - {CMDI}, quote_sanitized=False, shell_plain=False
+    )
 
 
 def literal(value: object) -> Taint:
-    if isinstance(value, (str, bytes)):
-        text = value if isinstance(value, str) else value.decode("latin-1")
-        return Taint(shell_plain=not (SHELL_QUOTE_CHARS & set(text)))
+    if isinstance(value, bytes):
+        # Rendered into text (`str(b)`, f-strings, `%s`) bytes become `b'...'`.
+        return Taint(shell_plain=False)
+    if isinstance(value, str):
+        return Taint(
+            shell_plain=not (SHELL_META_CHARS & set(value)),
+            program_start=starts_with_program(value),
+        )
+    if isinstance(value, (int, float, complex)):  # (bool is an int)
+        return Taint(number=True)
     return CONST
+
+
+def plain_template(node: ast.expr, *, printf: bool) -> bool:
+    """A literal template whose placeholders insert values as is: `{}`/`{name}` fields
+    without conversion or spec (`str.format`), or only `%s` (printf). `!r`, `%r`, padding
+    and the like add or move characters around a quoted value."""
+    if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+        return False
+    text = node.value
+    if printf:
+        return all(m.group(0) in {"%s", "%%"} for m in PRINTF_SPEC.finditer(text))
+    else:
+        try:
+            fields = list(string.Formatter().parse(text))
+        except ValueError:
+            return False
+        if not all(conv is None and not spec for _, f, spec, conv in fields if f is not None):
+            return False
+        # `{0[0]}` / `{0.x}` insert a part of the value (`'` of a shell-quoted one)
+        return not any(f is not None and ("." in f or "[" in f) for _, f, _, _ in fields)
+
+
+def drop_credit(value: Taint) -> Taint:
+    """A transformation that can make arbitrary characters out of a sanitized value
+    (`%c`, `int.to_bytes(...)`, `bytes([...])`, most methods): no sanitizer credit survives
+    it. Transformations of constants stay constant."""
+    if value.is_constant and not value.symbols:
+        return value
+    value = _unsafe_symbols(unquote(value), TAINT_CLASSES)
+    return replace(value, safe_for=frozenset())
+
+
+def local_object(value: Taint) -> Taint:
+    """A SQL object's credit stays within the function: a caller or callee may render it."""
+    return drop_credit(value) if value.sql_object else value
+
+
+def char_conversion(template: ast.expr | None, *, printf: bool) -> bool:
+    """Whether a template may rewrite the inserted values: turn numbers into characters
+    (`%c`, `{:c}`), select parts of them (`{0.wrapped}`, `{0[0]}`), or is unknown."""
+    if not (isinstance(template, ast.Constant) and isinstance(template.value, str)):
+        return True
+    if printf:
+        return any(m.group(1) == "c" for m in PRINTF_SPEC.finditer(template.value))
+    try:
+        fields = list(string.Formatter().parse(template.value))
+    except ValueError:
+        return True
+    return any(
+        f is not None and (spec_converts(spec) or "." in f or "[" in f) for _, f, spec, _ in fields
+    )
+
+
+# Format specs that only align with spaces/zeros, sign, pad, group and pick a numeric (or
+# `s`) type. A fill character (`{:->9}`, repeated a number of times that depends on the
+# value), type `c` or a nested `{...}` spec may produce other characters.
+SAFE_SPEC = re.compile(r"(?:[ 0]?[<>=^])?[+\- ]?z?#?0?\d*[,_]?(?:\.\d+)?[bdeEfFgGnosxX%]?")
+
+
+def spec_converts(spec: str | None) -> bool:
+    """A format spec that may produce characters other than the value's own text."""
+    return bool(spec) and SAFE_SPEC.fullmatch(spec) is None
+
+
+def formatted(value: Taint) -> Taint:
+    """Text from a template that converts or pads (`!r`, `%r`, `{:'>9}`): it may contain
+    quotes that no literal shows (`("%r" % "x")[:1]` is `'`)."""
+    return replace(value, shell_plain=False, program_start=False)
 
 
 def source(description: str, node: ast.AST) -> Taint:
@@ -309,6 +501,10 @@ def _decide(finding: Finding, taint: Taint | None) -> Finding:
                 Evidence(PRODUCER, "taint_verdict", "Every path supplies a constant value."),
             ),
         )
+    if finding.vuln_class == CMDI and taint.quote_sanitized and not taint.program_start:
+        # The quoted value may be the program itself (`os.system(quote(x))`), or the program
+        # is not known to leave its operands alone (`sh -c`): quoting proves nothing.
+        taint = unquote(taint)
     if finding.vuln_class == CMDI and CMDI in taint.safe_for and taint.quote_sanitized:
         # shlex.quote protects POSIX shells only; under Windows cmd.exe `&`, `|` still
         # chain commands. The target platform is unknown, so keep it visible.
@@ -374,12 +570,17 @@ class _FileEngine:
         self.targets = targets
         self.results: dict[int, Taint] = {}
         self.module_constants: frozenset[str] = frozenset()
+        # Their module-level values: constant, but the shell quote characters still
+        # matter where they are concatenated around a quoted value (`Q + quote(x) + Q`).
+        self.module_constant_values: dict[str, Taint] = {}
         self.facts = facts
         # `globals()`, `exec`, `__dict__`...: module names may change behind our back.
         self.namespace = _Namespace(ctx.tree)
         self.namespace_exposed = self.namespace.module
         self.linked: dict[int, str] = {}  # id(def) -> name, for linkable functions
         self._call_targets: dict[int, str | None] = {}
+        self._binding_counts: dict[int, dict[str, int]] = {}
+        self._stored_attrs: frozenset[str] | None = None
         self._sites: dict[tuple[int, int], tuple[str, int, list[Taint], dict[str, Taint]]] = {}
         if facts is not None:
             facts.symbols = module_symbols(ctx.tree, ctx.path)
@@ -391,6 +592,7 @@ class _FileEngine:
         module_env = module.run({})
         if not module.has_walrus:  # see `_FunctionEngine.has_walrus`
             self.module_constants = self._constant_globals(module_env or {})
+            self.module_constant_values = {n: module_env[n] for n in self.module_constants}
         for func in self._functions():
             if isinstance(func, ast.ClassDef):  # class body runs once, top to bottom
                 _FunctionEngine(self, func, frozenset()).run({})
@@ -446,6 +648,63 @@ class _FileEngine:
         kind, target = entry
         base = f"{self.facts.module}.{target}" if kind == "def" else target
         return ".".join([base, *reversed(parts)])
+
+    def stable_callee(self, call: ast.Call) -> bool:
+        """Whether the callee of `call` (a name or `module.attr` chain) cannot have been
+        replaced in this file: a stable root name, and no attribute of that name is
+        assigned or deleted anywhere (`shlex.quote = ...`, `setattr`, `delattr`)."""
+        attrs: list[str] = []
+        root = call.func
+        while isinstance(root, ast.Attribute):
+            attrs.append(root.attr)
+            root = root.value
+        if not isinstance(root, ast.Name) or not self.stable_name(root.id, call):
+            return False
+        if not attrs:
+            return True
+        if self._stored_attrs is None:
+            stored: set[str] = set()
+            for x in ast.walk(self.ctx.tree):
+                if isinstance(x, ast.Attribute) and isinstance(x.ctx, (ast.Store, ast.Del)):
+                    stored.add(x.attr)
+                elif isinstance(x, ast.Name) and x.id in {"setattr", "delattr"}:
+                    stored.add("*")  # any attribute, by a computed name
+            self._stored_attrs = frozenset(stored)
+        return "*" not in self._stored_attrs and not (self._stored_attrs & set(attrs))
+
+    def stable_name(self, name: str, node: ast.AST) -> bool:
+        """Whether `name` at `node` has exactly one binding (one import, one def) or none
+        (a builtin), so that a resolved callee cannot be a later reassignment instead."""
+        scope = self.ctx.scopes.scope_of(node)
+        first = True
+        while scope is not None:
+            if isinstance(scope.node, ast.ClassDef) and not first:
+                scope = scope.parent
+                continue
+            first = False
+            if scope.star_imports:
+                return False
+            # Follow declarations like `ScopeIndex.resolve_name`; their assignments are
+            # recorded as bindings of the owner scope.
+            if name in scope.globals_ and scope is not self.ctx.scopes.module:
+                scope = self.ctx.scopes.module
+                continue
+            if name in scope.nonlocals:
+                scope = scope.parent
+                while scope is not None and not scope.is_function:
+                    scope = scope.parent
+                continue
+            if name in scope.bindings:
+                if len(scope.bindings[name]) != 1:
+                    return False
+                if not isinstance(scope.node, (ast.Module, ast.ClassDef, *FUNCTION_TYPES)):
+                    return False  # comprehension variable
+                key = id(scope.node)
+                if key not in self._binding_counts:
+                    self._binding_counts[key] = _module_binding_counts(scope.node)
+                return self._binding_counts[key].get(name) == 1
+            scope = scope.parent
+        return True
 
     def module_owned(self, name: str, node: ast.AST) -> bool:
         """Whether `name` at `node` refers to the module-level binding."""
@@ -593,14 +852,22 @@ class _FunctionEngine:
                 self._assign(stmt.target, self.eval(stmt.value, env), env, stmt.value)
         elif isinstance(stmt, ast.AugAssign):
             current = self.eval(stmt.target, env)
-            value = combine((current, self.eval(stmt.value, env)))
+            value = self.eval(stmt.value, env)
+            if current.mutable:
+                value = combine((current, value))
+            elif isinstance(stmt.op, ast.Add):
+                value = concat([current, value])  # `cmd += ...` builds text like `+`
+            elif isinstance(stmt.op, ast.Mod):  # like `%` with a template that is not a literal
+                value = formatted(concat([unquote(current), drop_credit(value)]))
+            else:  # arithmetic, like the BinOp case
+                value = unquote(combine((current, value)))
             if current.mutable and isinstance(stmt.target, ast.Name):
                 self._weak_update(stmt.target.id, value, env)  # in-place `+=` on lists
             else:
                 self._assign(stmt.target, value, env, None)
         elif isinstance(stmt, (ast.Return, ast.Raise)):
             if self.track_returns and isinstance(stmt, ast.Return) and stmt.value is not None:
-                value = self.eval(stmt.value, env)
+                value = local_object(self.eval(stmt.value, env))
                 self.returns = value if self.returns is None else combine((self.returns, value))
             return None
         elif isinstance(stmt, ast.Break):
@@ -667,7 +934,8 @@ class _FunctionEngine:
         for _ in range(MAX_LOOP_ITERATIONS):
             body_env = dict(current)
             if target is not None and iter_ is not None:
-                self._assign(target, self.eval(iter_, body_env), body_env, iter_)
+                # an item of the iterable (a character of a string), never the whole
+                self._assign(target, item_of(self.eval(iter_, body_env)), body_env, iter_)
             self.break_states.append([])
             self.continue_states.append([])
             try:
@@ -728,10 +996,10 @@ class _FunctionEngine:
                 for name in self._mutable_names_in(value_expr, env):
                     self._union(target.id, name)  # alias = parts / x = [parts] / row = rows[0]
         elif isinstance(target, (ast.Tuple, ast.List)):
-            for elt in target.elts:
-                self._assign(elt, value, env, value_expr)
+            for elt in target.elts:  # parts of the value (characters of a string)
+                self._assign(elt, item_of(value), env, value_expr)
         elif isinstance(target, ast.Starred):
-            self._assign(target.value, value, env, value_expr)
+            self._assign(target.value, value, env, value_expr)  # inside a Tuple/List
         elif isinstance(target, (ast.Attribute, ast.Subscript)):
             base = _root_name(target)
             if base is not None:  # obj.x = v / d[k] = v: weak update of the container
@@ -813,6 +1081,8 @@ class _FunctionEngine:
             match = self.file.targets.get(id(node))
             if match is not None and match.arg is not None:
                 value = self.eval(match.arg, env)
+                if _may_choose_shell(node):
+                    value = unquote(value)  # fish, csh...: POSIX quoting proves nothing there
                 if self.has_walrus or self.deferred:
                     value = combine((value, UNKNOWN))  # never suppressed (see __init__)
                 self.file.record(node, value)
@@ -873,8 +1143,10 @@ class _FunctionEngine:
         for arg in call.args:
             if isinstance(arg, ast.Starred):
                 break  # later positions are unknown
-            positional.append(self.eval(arg, env))
-        keywords = {k.arg: self.eval(k.value, env) for k in call.keywords if k.arg is not None}
+            positional.append(local_object(self.eval(arg, env)))
+        keywords = {
+            k.arg: local_object(self.eval(k.value, env)) for k in call.keywords if k.arg is not None
+        }
         self.file.record_site(call, positional, keywords)
 
     def _call_effects(self, call: ast.Call, env: Env) -> None:
@@ -936,6 +1208,85 @@ class _FunctionEngine:
     # -- expressions -----------------------------------------------------------------------
 
     def eval(self, node: ast.AST | None, env: Env) -> Taint:
+        value = self._eval(node, env)
+        if value.quote_sanitized and not self._keeps_quoting(node):
+            value = unquote(value)
+        if value.sql_object and not self._keeps_object(node):
+            value = drop_credit(value)  # rendered as Python text, or taken apart
+        return value
+
+    def _keeps_object(self, node: ast.AST | None) -> bool:
+        """A SQL object keeps its credit only while it is passed on as is."""
+        if isinstance(node, (ast.Name, ast.NamedExpr, ast.IfExp, ast.BoolOp)):
+            return True
+        return isinstance(node, ast.Call) and bool(
+            self._sanitizer_names(node) & SQL_OBJECT_SANITIZERS
+        )
+
+    def _join(self, node: ast.Call, sep: Taint, args: list[Taint], env: Env) -> Taint:
+        """`sep.join(items)`. Items of a list/tuple display or comprehension are whole
+        strings; anything else may be a string, whose items are single characters."""
+        arg = node.args[0] if len(node.args) == 1 and not node.keywords else None
+        if isinstance(arg, (ast.List, ast.Tuple)) and not any(
+            isinstance(e, ast.Starred) for e in arg.elts
+        ):
+            result = concat([sep, *(self.eval(e, env) for e in arg.elts)])
+            first, joiner = (arg.elts[0] if arg.elts else None), node.func.value  # type: ignore[attr-defined]
+            if not (isinstance(joiner, ast.Constant) and isinstance(joiner.value, str)):
+                return replace(result, program_start=False)  # `sep.join(...)`: unknown text
+            # The separator follows the first item only if there is a second one.
+            after = joiner.value if len(arg.elts) > 1 else ""
+            program = (
+                isinstance(first, ast.Constant)
+                and isinstance(first.value, str)
+                and starts_with_program(first.value + after)
+            )
+            return replace(result, program_start=program)
+        if isinstance(arg, (ast.ListComp, ast.GeneratorExp)):
+            # Consumed right here; loop variables are items (see `_comprehension_binding`).
+            item = self.eval(arg.elt, env)
+            count = combine(self.eval(g.iter, env) for g in arg.generators)
+            if known(item) and (any(g.ifs for g in arg.generators) or not known(count)):
+                # a constant repeated a number of times chosen at runtime is no constant
+                item = combine((item, UNKNOWN))
+            # (the text starts with an item, not with the separator)
+            return replace(concat([sep, item]), program_start=False)
+        result = concat([sep, *(unquote(a) for a in args)])  # characters / unknown items
+        return replace(result, program_start=False)
+
+    def _keeps_quoting(self, node: ast.AST | None) -> bool:
+        """Quoting credit is context-sensitive, so it survives only expressions that pass a
+        quoted string on whole or embed it as is in larger text (whose context `concat`
+        checks). Containers, iteration, indexing, other calls... lose it: `str((q,))`
+        quotes again, `"".join(q)` or `[c for c in q]` work on single characters."""
+        if isinstance(node, (ast.Name, ast.NamedExpr, ast.IfExp, ast.BoolOp, ast.JoinedStr)):
+            return True
+        if isinstance(node, ast.FormattedValue):
+            return True  # conversions and specs are handled in `_eval`
+        if isinstance(node, ast.BinOp):
+            return isinstance(node.op, (ast.Add, ast.Mod))
+        if not isinstance(node, ast.Call):
+            return False
+        if self._sanitizer_names(node) & QUOTING_SANITIZERS:
+            return True
+        func = node.func
+        # no `*args` / `**kwargs` (their items are unknown); named arguments are fine
+        plain_args = not any(isinstance(a, ast.Starred) for a in node.args) and all(
+            k.arg is not None for k in node.keywords
+        )
+        if isinstance(func, ast.Attribute):
+            if func.attr == "join":
+                return True  # items are checked in `_join`
+            return func.attr == "format" and plain_args and plain_template(func.value, printf=False)
+        return (
+            isinstance(func, ast.Name)
+            and not node.keywords
+            and plain_args
+            and len(node.args) == 1
+            and self._sanitizer_names(node) == {"str"}
+        )
+
+    def _eval(self, node: ast.AST | None, env: Env) -> Taint:
         if node is None:
             return CONST
         if isinstance(node, ast.Constant):
@@ -943,9 +1294,29 @@ class _FunctionEngine:
         if isinstance(node, ast.Name):
             return self._lookup(node.id, node, env)
         if isinstance(node, ast.Attribute):
-            return self._attribute(node, env)
+            # Any object's attribute, rendered as anything (`str("x".__class__)`); of a
+            # sanitized value, maybe its raw data (`uuid.UUID(x).bytes`, `.wrapped`).
+            value = drop_credit(self._attribute(node, env))
+            return replace(value, shell_plain=False, program_start=False)
         if isinstance(node, ast.Subscript):
-            return unquote(self.eval(node.value, env))  # slicing can strip the quotes
+            value = self.eval(node.value, env)
+            index = self.eval(node.slice, env)
+            if (
+                value.is_constant
+                and not value.symbols
+                and not value.container
+                and not (index.is_constant and not index.symbols)
+            ):
+                # Characters of a constant text, chosen at runtime (`"abc"[i]`): no longer a
+                # constant. (A container's element is one whole constant value.)
+                return combine((unquote(value), UNKNOWN))
+            if value.container and not isinstance(node.slice, ast.Slice):
+                # One element: maybe a text, whose characters a later index selects.
+                return replace(unquote(value), container=False)
+            if value.container:
+                return unquote(value)  # a slice of the container
+            # slicing can strip the quotes; a slice of a text names no known program
+            return replace(unquote(value), program_start=False)
         if isinstance(node, ast.Call):
             return self._call(node, env)
         if isinstance(node, ast.Compare) or (
@@ -959,10 +1330,38 @@ class _FunctionEngine:
         if isinstance(node, ast.JoinedStr):
             return concat([self.eval(v, env) for v in node.values])
         if isinstance(node, ast.FormattedValue):
-            return self.eval(node.value, env)
+            value = self.eval(node.value, env)
+            if node.conversion != -1 or node.format_spec is not None:
+                # `!r` adds quotes, a spec pads with arbitrary fill characters.
+                spec = self.eval(node.format_spec, env) if node.format_spec else CONST
+                if node.format_spec is not None and (
+                    any(not isinstance(v, ast.Constant) for v in node.format_spec.values)
+                    or spec_converts("".join(v.value for v in node.format_spec.values))
+                ):
+                    value = drop_credit(value)  # `{n:c}`, or a spec only known at runtime
+                return formatted(concat([unquote(value), spec]))
+            return value
         if isinstance(node, ast.BinOp):
+            if (
+                isinstance(node.op, ast.Mod)
+                and isinstance(node.right, ast.Tuple)
+                and not any(isinstance(e, ast.Starred) for e in node.right.elts)
+                and plain_template(node.left, printf=True)
+            ):
+                # `"... %s" % (a, b)`: each item fills one `%s` (an item that is itself a
+                # container loses quoting credit in `eval`).
+                left = self.eval(node.left, env)
+                return concat([left, *(self.eval(e, env) for e in node.right.elts)])
             left, right = self.eval(node.left, env), self.eval(node.right, env)
-            if isinstance(node.op, (ast.Add, ast.Mod)) and not (left.mutable or right.mutable):
+            if isinstance(node.op, ast.Mod) and not left.mutable and not left.number:
+                # printf formatting: a list/dict operand or a `%r`-like spec changes the text.
+                if right.mutable or not plain_template(node.left, printf=True):
+                    left, right = unquote(left), unquote(right)  # a quoted value as template
+                    if char_conversion(node.left, printf=True):
+                        right = drop_credit(right)  # `%c`, or a template only known at runtime
+                    return formatted(concat([left, right]))
+                return concat([left, right])
+            if isinstance(node.op, ast.Add) and not (left.mutable or right.mutable):
                 return concat([left, right])  # string building (or arithmetic: harmless)
             return combine((left, right))
         if isinstance(node, COMPREHENSION_TYPES):
@@ -971,17 +1370,21 @@ class _FunctionEngine:
             if isinstance(node, ast.GeneratorExp):
                 # Produced when consumed, possibly after its free names were rebound.
                 return combine((value, UNKNOWN))
-            return replace(value, mutable=True)
+            return replace(value, mutable=True, shell_plain=False, container=True)  # ['x']
         if isinstance(node, (ast.List, ast.Set, ast.Dict)):
             children = [c for c in ast.iter_child_nodes(node) if isinstance(c, ast.expr)]
-            return replace(combine(self.eval(c, env) for c in children), mutable=True)
+            value = combine(self.eval(c, env) for c in children)
+            return replace(value, mutable=True, shell_plain=False, container=True)  # ['x']
         if isinstance(node, (ast.Lambda, ast.Yield, ast.YieldFrom)):
             return UNKNOWN
         if isinstance(
             node, (ast.BoolOp, ast.UnaryOp, ast.Tuple, ast.Starred, ast.Await, ast.Slice)
         ):
             children = [c for c in ast.iter_child_nodes(node) if isinstance(c, ast.expr)]
-            return combine(self.eval(c, env) for c in children) if children else CONST
+            value = combine(self.eval(c, env) for c in children) if children else CONST
+            if isinstance(node, ast.Tuple):  # renders as `('x',)`
+                return replace(value, shell_plain=False, container=True)
+            return value
         return UNKNOWN
 
     def _lookup(self, name: str, node: ast.AST, env: Env) -> Taint:
@@ -1008,7 +1411,14 @@ class _FunctionEngine:
             and name in self.file.module_constants
             and self.file.module_owned(name, node)  # not an enclosing function's local
         ):
-            return CONST
+            value = self.file.module_constant_values.get(name, CONST)
+            # a constant, with its text flag and shape (`FORMULAS[name]` picks a whole value)
+            return Taint(
+                shell_plain=value.shell_plain,
+                container=value.container,
+                number=value.number,
+                program_start=value.program_start,
+            )
         return UNKNOWN
 
     def _comprehension_binding(self, name: str, node: ast.AST, env: Env) -> Taint | None:
@@ -1021,7 +1431,8 @@ class _FunctionEngine:
                     if any(isinstance(t, ast.Name) and t.id == name for t in ast.walk(gen.target))
                 ]
                 if len(binders) == 1 and not self._mutates_targets(scope.node):
-                    return self.eval(binders[0].iter, env)
+                    # an item of the iterable (a character of a string), never the whole
+                    return item_of(self.eval(binders[0].iter, env))
                 return UNKNOWN  # rebound by a later `for`: which one applies depends on order
             scope = scope.parent
         return None
@@ -1051,10 +1462,22 @@ class _FunctionEngine:
         value = self._call_value(node, env)
         if self.file.call_target(node) is None:
             return value
-        if self.ctx.call_names(node) & (SOURCE_NAMES.keys() | SANITIZERS.keys()):
+        if self._sanitizer_names(node) & (SOURCE_NAMES.keys() | SANITIZERS.keys()):
             return value
         # A linkable callee may return untrusted data of its own (resolved by `interproc`).
         return _with_symbol(value, ("ret", self.ctx.path, node.lineno, node.col_offset))
+
+    def _sanitizer_names(self, node: ast.Call) -> frozenset[str]:
+        """Resolved names of a callee that cannot be a reassignment instead (see
+        `_FileEngine.stable_callee`): `int = lambda s: s` after the import gets no credit."""
+        if not self.file.stable_callee(node):
+            return frozenset()
+        names = self.ctx.call_names(node)
+        if self.file.namespace_exposed:
+            # `exec`/`globals()` may rebind any module name; keep only plain sanitizers
+            # (as before), not the context-sensitive quoting helpers.
+            names = names - QUOTING_SANITIZERS
+        return names
 
     def _call_value(self, node: ast.Call, env: Env) -> Taint:
         names = self.ctx.call_names(node)
@@ -1063,10 +1486,12 @@ class _FunctionEngine:
             if qualified in SOURCE_NAMES:
                 return source(SOURCE_NAMES[qualified], node)
         safe: set[str] = set()
-        quoting = False
-        for qualified in names:
+        quoting = obj = numeric = False
+        for qualified in self._sanitizer_names(node):
             safe |= SANITIZERS.get(qualified, frozenset())
             quoting = quoting or qualified in QUOTING_SANITIZERS
+            obj = obj or qualified in SQL_OBJECT_SANITIZERS
+            numeric = numeric or qualified in NUMERIC_SANITIZERS
         if safe:
             value = combine(args) if args else CONST
             return Taint(
@@ -1077,6 +1502,9 @@ class _FunctionEngine:
                 shell_plain=True if quoting else value.shell_plain,
                 quote_sanitized=quoting or value.quote_sanitized,
                 symbols=frozenset((a, s | safe) for a, s in value.symbols),
+                sql_object=obj,
+                number=numeric and not quoting and not obj,
+                program_start=quoting and _joined_program(node),
             )
         func = node.func
         if isinstance(func, ast.Attribute):
@@ -1084,21 +1512,90 @@ class _FunctionEngine:
             # (`request.args.get("q")`, `" ".join(parts)`, `template.format(x)`).
             receiver = self._attribute(func, env)
             if func.attr in TEMPLATE_METHODS:
-                return concat([receiver, *args])
+                if func.attr != "join" and not plain_template(func.value, printf=False):
+                    # `{!r}`, `{:>9}`, or an unknown template (maybe a quoted value itself)
+                    receiver, args = unquote(receiver), [unquote(a) for a in args]
+                    if char_conversion(func.value, printf=False):
+                        args = [drop_credit(a) for a in args]  # `{:c}`, or an unknown template
+                    return formatted(concat([receiver, *args]))
+                if func.attr == "join":
+                    return self._join(node, receiver, args, env)
+                # The template's text without its fields (a field breaks a word: `ec{}ho`).
+                pieces = string.Formatter().parse(func.value.value)  # type: ignore[attr-defined]
+                text = literal("\0".join(lit for lit, *_ in pieces))
+                flags = {"shell_plain": text.shell_plain, "program_start": text.program_start}
+                return concat([replace(receiver, **flags), *args])
             if func.attr in STRING_METHODS:
                 value = replace(combine((receiver, *args)), mutable=False)
-                return value if func.attr in {"encode", "decode"} else unquote(value)
-            return unquote(combine((receiver, *args)))
+                if func.attr == "encode":  # bytes render as b'...' (credit: see `eval`)
+                    value = replace(value, shell_plain=False)
+                    # a codec may rewrite characters (`encode("unicode_escape")`)
+                    return value if not node.args and not node.keywords else drop_credit(value)
+                # (decode: every bytes value is already not shell_plain, see `literal`)
+                value = replace(unquote(value), number=False, program_start=False)
+                return value if func.attr in CREDIT_KEEPING_METHODS else drop_credit(value)
+            # Any other method: any value (a list renders with quotes), any characters.
+            value = drop_credit(unquote(combine((receiver, *args))))
+            return replace(value, shell_plain=False, number=False, program_start=False)
+        if self._sanitizer_names(node) & NUMERIC_PASSTHROUGH:
+            # The argument's own credit, if any (`abs(int(x))`), not a new one.
+            value = combine(args) if args else CONST
+            return replace(value, mutable=False, number=bool(args) and args[0].number)
         if names & MUTABLE_BUILTINS:
-            return replace(combine(args) if args else CONST, mutable=True)
+            value = combine(args) if args else CONST
+            if names & CHAR_BUILTINS:
+                value = drop_credit(value)  # bytearray: bytes, not a container of elements
+                return replace(value, mutable=True, shell_plain=False)
+            return replace(value, mutable=True, shell_plain=False, container=True)
         if names & PURE_BUILTINS:
             value = combine(args) if args else CONST
-            return value if names == {"str"} else unquote(value)  # repr() adds quotes
+            if names & CHAR_BUILTINS:
+                value = drop_credit(value)
+            if names & STR_BUILTINS:  # a new string: not the (maybe mutable) argument
+                value = replace(value, mutable=False)
+            if names == {"str"}:
+                # A string as is. Values that render with quotes (bytes, containers) are
+                # already not shell_plain; str(b, encoding) decodes bytes, likewise.
+                return replace(value, container=False)  # text, even of a container
+            # repr()/ascii() add quotes, format() pads, tuple()/sorted() add brackets.
+            value = replace(unquote(value), shell_plain=False, number=False, program_start=False)
+            return replace(value, container=bool(names & CONTAINER_BUILTINS))
         # Unknown function: taint flows through, but the result is not provably constant.
         return combine((UNKNOWN, *args))
 
 
 # -- helpers ------------------------------------------------------------------------------
+
+
+def _may_choose_shell(call: ast.Call) -> bool:
+    """Whether a sink call may name the shell that runs its command instead of `/bin/sh`:
+    `executable=`, `Popen`'s third positional parameter, or arguments passed in bulk."""
+    return (
+        len(call.args) > 2
+        or any(isinstance(a, ast.Starred) for a in call.args)
+        or any(k.arg is None or k.arg == "executable" for k in call.keywords)
+    )
+
+
+def _joined_program(node: ast.Call) -> bool:
+    """`shlex.join([...])` whose program (first item) is a literal on the inert list and
+    followed by another item, so the separating space completes it (`shlex.join(["ls"])`
+    ends right after the name, as may `["ls", *rest]`: text appended next extends it);
+    `shlex.quote(x)` itself is a single word: in the program position it is the program."""
+    if not (isinstance(node.func, (ast.Name, ast.Attribute)) and len(node.args) == 1):
+        return False
+    name = node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id
+    arg = node.args[0]
+    if name != "join" or not isinstance(arg, (ast.List, ast.Tuple)) or len(arg.elts) < 2:
+        return False
+    if any(isinstance(e, ast.Starred) for e in arg.elts):
+        return False
+    first = arg.elts[0]
+    return (  # the whole item: `shlex.join` keeps `"ls x"` one (unlisted) program name
+        isinstance(first, ast.Constant)
+        and isinstance(first.value, str)
+        and inert_program(first.value)
+    )
 
 
 def _call_args(node: ast.Call) -> list[ast.expr]:
@@ -1174,8 +1671,9 @@ def _declared_shared(scope: ast.AST) -> frozenset[str]:
     )
 
 
-def _module_binding_counts(tree: ast.Module) -> dict[str, int]:
-    """How many binding sites each module-level name has (over-counting is safe)."""
+def _module_binding_counts(tree: ast.AST) -> dict[str, int]:
+    """How many binding sites each name of a scope (module, class or function body; not
+    parameters) has (over-counting is safe)."""
     counts: dict[str, int] = {}
     for node in _own_nodes(tree):
         names: list[str] = []

@@ -557,10 +557,12 @@ def test_literal_eval_is_not_an_eval_sanitizer():
 
 
 def test_shlex_quote_in_plain_context_is_low_confidence():
+    # (A pipeline or any other shell syntax in the command text gets no quoting credit:
+    # see tests/test_quoting_credit.py.)
     (f,) = scan(
         """
         def f():
-            os.system("ls -l " + shlex.quote(input()) + " | wc -l")
+            os.system("ls -l " + shlex.quote(input()))
         """
     )
     assert (f.status, f.confidence) == (Status.CANDIDATE, 20)
