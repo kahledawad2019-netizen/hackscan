@@ -395,7 +395,8 @@ def _text(
         lines.append("")
     ordered = sorted(
         findings,
-        key=lambda f: (-f.severity.rank, f.status is not Status.CONFIRMED, f.sort_key()),
+        key=lambda f: (-f.severity.rank, f.status is not Status.CONFIRMED, -f.confidence,
+                       *f.location.sort_key(), f.id),
     )
     for f in ordered:
         loc = f"{f.location.path}:{f.location.start_line}:{f.location.start_column}"

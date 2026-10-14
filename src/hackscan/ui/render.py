@@ -59,7 +59,8 @@ def render(
 ) -> None:
     ordered = sorted(
         findings,
-        key=lambda f: (-f.severity.rank, f.status is not Status.CONFIRMED, f.sort_key()),
+        key=lambda f: (-f.severity.rank, f.status is not Status.CONFIRMED, -f.confidence,
+                       *f.location.sort_key(), f.id),
     )
     for f in ordered:
         console.print(_finding_panel(f, show_fixes, diff_for))

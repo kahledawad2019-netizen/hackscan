@@ -143,3 +143,38 @@ def test_fix_diff_masks_secrets_on_both_sides(tmp_path):
     )
     assert "+    token = " in out and "hashlib.sha256" in out
     assert "tok-secret-67890" not in out
+
+
+def test_terminal_order_puts_higher_confidence_first():
+    """Severity, then confirmed first, then confidence (descending), then location: the agent's triage order."""
+    from dataclasses import replace
+
+    from hackscan.cli import _text
+    from hackscan.core.models import Status
+
+    result = scan(FRAMEWORKS, HackScanConfig())
+    base = result.findings[0]
+    early = replace(base, id="hs1-early", message="EARLY-LOW", confidence=20, status=Status.CANDIDATE)
+    late = replace(base, id="hs1-late", message="LATE-HIGH", confidence=90, status=Status.CANDIDATE,
+                   location=replace(base.location, start_line=base.location.start_line + 50,
+                                    end_line=base.location.end_line + 50))
+    out = recorded(lambda c: render(c, result, [early, late], HackScanConfig()))
+    assert out.index("LATE-HIGH") < out.index("EARLY-LOW")
+    plain = _text(result, [early, late], HackScanConfig(), quiet=False)
+    assert plain.index("LATE-HIGH") < plain.index("EARLY-LOW")
+
+
+def test_exact_ties_are_ordered_by_id_not_rule():
+    """Equal severity, status, confidence and location: the protocol breaks ties by finding id."""
+    from dataclasses import replace
+
+    from hackscan.cli import _text
+
+    result = scan(FRAMEWORKS, HackScanConfig())
+    base = result.findings[0]
+    first = replace(base, id="hs1-aaaa", rule_id="HS-ZZZ-999", message="ID-FIRST")
+    second = replace(base, id="hs1-bbbb", rule_id="HS-AAA-001", message="ID-SECOND")
+    out = recorded(lambda c: render(c, result, [second, first], HackScanConfig()))
+    assert out.index("ID-FIRST") < out.index("ID-SECOND")
+    plain = _text(result, [second, first], HackScanConfig(), quiet=False)
+    assert plain.index("ID-FIRST") < plain.index("ID-SECOND")
