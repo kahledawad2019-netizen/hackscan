@@ -21,6 +21,8 @@ CONFIG_NAME = ".hackscan.yml"
 CONFIG_KEYS = frozenset(
     {
         "ignore",
+        "knowledge",
+        "project-knowledge",
         "severity",
         "min-confidence",
         "fail-on",
@@ -96,6 +98,10 @@ class HackScanConfig:
     strict_tools: bool = False
     allow_incomplete: bool = False  # files that cannot be analyzed do not fail the run
     jobs: int = 0  # 0 = automatic
+    # Project notes: knowledge entries that only ADD untrusted inputs (hackscan.taint.knowledge),
+    # each a tuple of (key, value) pairs. `project_knowledge=False` ignores them (e.g. for audits).
+    knowledge: tuple[tuple[tuple[str, str], ...], ...] = ()
+    project_knowledge: bool = True
     sources: tuple[Path, ...] = field(default=(), compare=False)  # config files loaded
 
     def with_overrides(self, **overrides: Any) -> HackScanConfig:
@@ -164,6 +170,7 @@ def _merge(config: HackScanConfig, data: dict[str, Any], path: Path) -> HackScan
         "llm-suppress",
         "strict-tools",
         "allow-incomplete",
+        "project-knowledge",
     ):
         if key in data:
             if not isinstance(data[key], bool):
@@ -179,6 +186,20 @@ def _merge(config: HackScanConfig, data: dict[str, Any], path: Path) -> HackScan
             if not isinstance(data[key], str) or not data[key].strip():
                 raise err(f"`{key}` must be a non-empty string")
             values[key.replace("-", "_")] = data[key].strip()
+    if "knowledge" in data:
+        from hackscan.taint.knowledge import PROJECT_TYPES, KnowledgeError, _entry
+
+        items = data["knowledge"]
+        if not isinstance(items, list):
+            raise err("`knowledge` must be a list of entries ({type, value, description?})")
+        parsed = []
+        for i, item in enumerate(items):
+            try:
+                entry = _entry(item, allowed=PROJECT_TYPES, where=f"knowledge entry {i + 1}")
+            except KnowledgeError as exc:
+                raise err(str(exc)) from None
+            parsed.append(tuple(sorted((k, v) for k, v in entry.items() if v is not None)))
+        values["knowledge"] = (*config.knowledge, *parsed)
     if "plugins" in data:
         values["plugins"] = (path.parent / str(data["plugins"])).resolve()
     if "with" in data:

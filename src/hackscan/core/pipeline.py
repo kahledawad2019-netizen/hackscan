@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from hackscan.analyzers.ast_pass import FileResult, analyze_file, analyze_source
+from hackscan.taint import knowledge
 from hackscan.analyzers.interproc import confirm_findings
 from hackscan.analyzers.llm_pass import LLMConfig, default_cache_dir, triage
 from hackscan.analyzers.remediate import generate_fixes
@@ -45,9 +46,26 @@ class ScanResult:
     # Values to redact from any raw text shown later (e.g. fix diffs). Never exported.
     secrets: frozenset[str] = field(default=frozenset(), repr=False)
     file_secrets: dict[str, set[str]] = field(default_factory=dict, repr=False)
+    # The knowledge data the scan used: built-in version and hash, and how many project notes.
+    knowledge_version: str = ""
+    knowledge_sha256: str = ""
+    project_notes: int = 0
+
+
+def _knowledge_for(config: HackScanConfig) -> knowledge.Knowledge:
+    return knowledge.for_config([dict(e) for e in config.knowledge], config.project_knowledge)
 
 
 def scan(target: Path, config: HackScanConfig) -> ScanResult:
+    """Scan with the configuration's knowledge active for the duration of the scan."""
+    token = knowledge.use(_knowledge_for(config))
+    try:
+        return _scan(target, config)
+    finally:
+        knowledge.restore(token)
+
+
+def _scan(target: Path, config: HackScanConfig) -> ScanResult:
     started = time.perf_counter()
     target = target.resolve()
     root = target if target.is_dir() else target.parent
@@ -139,6 +157,9 @@ def scan(target: Path, config: HackScanConfig) -> ScanResult:
         secrets=frozenset(all_secrets),
         file_secrets=file_secrets,
         tool_runs=external.runs,
+        knowledge_version=knowledge.active().version,
+        knowledge_sha256=knowledge.active().sha256,
+        project_notes=sum(o == knowledge.PROJECT_NOTE for o in knowledge.active().provenance.values()),
     )
 
 
@@ -200,9 +221,10 @@ def _is_ignored(rel_path: str, patterns: tuple[str, ...], is_dir: bool = False) 
 _WORKER_STATE: dict = {}
 
 
-def _worker_init(plugins_dir: str | None, taint: bool) -> None:
+def _worker_init(plugins_dir: str | None, taint: bool, notes: tuple, use_notes: bool) -> None:
     _WORKER_STATE["plugins"] = resolve_plugins(Path(plugins_dir) if plugins_dir else None)
     _WORKER_STATE["taint"] = taint
+    knowledge.use(knowledge.for_config([dict(e) for e in notes], use_notes))
 
 
 def _worker_analyze(args: tuple[str, str]) -> FileResult:
@@ -221,7 +243,9 @@ def _analyze(
         ]
     plugins_dir = str(config.plugins) if config.plugins else None
     with ProcessPoolExecutor(
-        max_workers=jobs, initializer=_worker_init, initargs=(plugins_dir, config.taint)
+        max_workers=jobs,
+        initializer=_worker_init,
+        initargs=(plugins_dir, config.taint, config.knowledge, config.project_knowledge),
     ) as pool:
         chunk = max(1, len(files) // (jobs * 4))
         return list(

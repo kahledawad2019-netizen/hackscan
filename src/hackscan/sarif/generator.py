@@ -73,6 +73,11 @@ def export_sarif(
                         "semanticVersion": __version__,
                         "informationUri": INFORMATION_URI,
                         "rules": rules,
+                        "properties": {
+                            "knowledgeVersion": result.knowledge_version,
+                            "knowledgeSha256": result.knowledge_sha256,
+                            "projectNotes": result.project_notes,
+                        },
                     }
                 },
                 "originalUriBaseIds": {SRCROOT: {"uri": base.as_uri() + "/"}},

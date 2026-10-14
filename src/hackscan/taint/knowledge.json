@@ -1,0 +1,322 @@
+{
+ "schema": "hackscan-knowledge/1",
+ "version": "0.4.0",
+ "entries": [
+  {
+   "type": "flask_request_attr",
+   "value": "args",
+   "rationale": "attribute of flask.request carrying client data",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "flask_request_attr",
+   "value": "cookies",
+   "rationale": "attribute of flask.request carrying client data",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "flask_request_attr",
+   "value": "data",
+   "rationale": "attribute of flask.request carrying client data",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "flask_request_attr",
+   "value": "files",
+   "rationale": "attribute of flask.request carrying client data",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "flask_request_attr",
+   "value": "form",
+   "rationale": "attribute of flask.request carrying client data",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "flask_request_attr",
+   "value": "full_path",
+   "rationale": "attribute of flask.request carrying client data",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "flask_request_attr",
+   "value": "get_data",
+   "rationale": "attribute of flask.request carrying client data",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "flask_request_attr",
+   "value": "get_json",
+   "rationale": "attribute of flask.request carrying client data",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "flask_request_attr",
+   "value": "headers",
+   "rationale": "attribute of flask.request carrying client data",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "flask_request_attr",
+   "value": "json",
+   "rationale": "attribute of flask.request carrying client data",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "flask_request_attr",
+   "value": "path",
+   "rationale": "attribute of flask.request carrying client data",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "flask_request_attr",
+   "value": "query_string",
+   "rationale": "attribute of flask.request carrying client data",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "flask_request_attr",
+   "value": "stream",
+   "rationale": "attribute of flask.request carrying client data",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "flask_request_attr",
+   "value": "url",
+   "rationale": "attribute of flask.request carrying client data",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "flask_request_attr",
+   "value": "values",
+   "rationale": "attribute of flask.request carrying client data",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "flask_request_attr",
+   "value": "view_args",
+   "rationale": "attribute of flask.request carrying client data",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "COOKIES",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "FILES",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "GET",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "META",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "POST",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "args",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "body",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "cookies",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "data",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "form",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "get_data",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "get_json",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "headers",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "json",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "path",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "path_info",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "path_params",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "query_params",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "url",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_attr",
+   "value": "values",
+   "rationale": "request-data attribute of a request object parameter (Django/DRF/Starlette/FastAPI/Flask)",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_name",
+   "value": "req",
+   "rationale": "conventional name of a request object parameter",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "request_param_name",
+   "value": "request",
+   "rationale": "conventional name of a request object parameter",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "source_name",
+   "value": "sys.argv",
+   "description": "command-line arguments (sys.argv)",
+   "rationale": "untrusted input by resolved dotted name",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "source_name",
+   "value": "sys.stdin",
+   "description": "standard input (sys.stdin)",
+   "rationale": "untrusted input by resolved dotted name",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "source_name",
+   "value": "input",
+   "description": "user input (input())",
+   "rationale": "untrusted input by resolved dotted name",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "source_name",
+   "value": "builtins.input",
+   "description": "user input (input())",
+   "rationale": "untrusted input by resolved dotted name",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "route_decorator",
+   "value": "api_route",
+   "rationale": "decorator method registering an HTTP route handler; its parameters are client-controlled",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "route_decorator",
+   "value": "delete",
+   "rationale": "decorator method registering an HTTP route handler; its parameters are client-controlled",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "route_decorator",
+   "value": "get",
+   "rationale": "decorator method registering an HTTP route handler; its parameters are client-controlled",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "route_decorator",
+   "value": "head",
+   "rationale": "decorator method registering an HTTP route handler; its parameters are client-controlled",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "route_decorator",
+   "value": "options",
+   "rationale": "decorator method registering an HTTP route handler; its parameters are client-controlled",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "route_decorator",
+   "value": "patch",
+   "rationale": "decorator method registering an HTTP route handler; its parameters are client-controlled",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "route_decorator",
+   "value": "post",
+   "rationale": "decorator method registering an HTTP route handler; its parameters are client-controlled",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "route_decorator",
+   "value": "put",
+   "rationale": "decorator method registering an HTTP route handler; its parameters are client-controlled",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "route_decorator",
+   "value": "route",
+   "rationale": "decorator method registering an HTTP route handler; its parameters are client-controlled",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  },
+  {
+   "type": "route_decorator",
+   "value": "websocket",
+   "rationale": "decorator method registering an HTTP route handler; its parameters are client-controlled",
+   "evidence": "HackScan <= 0.3.2 built-in source list (moved to data in 0.4 with identical behaviour)"
+  }
+ ]
+}

@@ -364,7 +364,15 @@ def _diff(result: ScanResult, finding: Finding) -> str:
 
 def _json(result: ScanResult, findings: list[Finding]) -> dict:
     return {
-        "tool": {"name": "hackscan", "version": __version__},
+        "tool": {
+            "name": "hackscan",
+            "version": __version__,
+            "knowledge": {
+                "version": result.knowledge_version,
+                "sha256": result.knowledge_sha256,
+                "project_notes": result.project_notes,
+            },
+        },
         "root": result.root.as_posix(),
         "stats": {
             "files_scanned": result.files_scanned,

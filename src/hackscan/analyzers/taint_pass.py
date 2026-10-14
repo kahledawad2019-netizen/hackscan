@@ -51,13 +51,8 @@ from hackscan.taint.sanitizers import (
     SANITIZERS,
     SQL_OBJECT_SANITIZERS,
 )
-from hackscan.taint.sources import (
-    REQUEST_PARAM_ATTRS,
-    REQUEST_PARAM_NAMES,
-    SOURCE_NAMES,
-    flask_request_source,
-    is_route_handler,
-)
+from hackscan.taint import knowledge
+from hackscan.taint.sources import flask_request_source, route_decorators_of
 
 PRODUCER = "taint"
 CONSTANT_INPUT = "taint:constant_input"
@@ -428,6 +423,20 @@ def source(description: str, node: ast.AST) -> Taint:
     )
 
 
+def from_note(*keys: tuple[str, str]) -> bool:
+    """Whether every knowledge entry behind a source is a project note (none is built in)."""
+    provenance = knowledge.active().provenance
+    return all(provenance.get(k) == knowledge.PROJECT_NOTE for k in keys)
+
+
+def known_source(description: str, node: ast.AST, *keys: tuple[str, str]) -> Taint:
+    """A source named by knowledge entries. Built-in sources are text values (as before); an input
+    that only a project note names may be any object, so it is treated as possibly mutable, with
+    its own methods: escaping and mutation stay conservative, and a note never suppresses."""
+    value = source(description, node)
+    return replace(value, mutable=True) if keys and from_note(*keys) else value
+
+
 Env = dict[str, Taint]
 
 
@@ -772,18 +781,24 @@ class _FileEngine:
         args = func.args  # type: ignore[attr-defined]
         names = [a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
         names += [a.arg for a in (args.vararg, args.kwarg) if a is not None]
-        route = is_route_handler(func)
+        decorators = route_decorators_of(func)
+        route = bool(decorators)
+        note_route = route and from_note(*(("route_decorator", d) for d in decorators))
         fname = getattr(func, "name", "<lambda>")
         linked = self.linked.get(id(func))
         env: Env = {}
         for name in names:
-            if route and name not in {"self", "cls"} and name not in REQUEST_PARAM_NAMES:
+            # Only built-in request-object names stop a route parameter from being a source: a
+            # project note may add request objects but never removes an untrusted input.
+            if route and name not in {"self", "cls"} and name not in knowledge.BUILTIN.request_param_names:
                 env[name] = source(f"route parameter `{name}` of handler `{fname}`", func)
+                if note_route:
+                    env[name] = replace(env[name], mutable=True)
             elif linked is not None:
                 env[name] = _with_symbol(UNKNOWN, ("param", self.ctx.path, linked, name))
             else:
                 env[name] = UNKNOWN
-        request_params = frozenset(n for n in names if n in REQUEST_PARAM_NAMES)
+        request_params = frozenset(n for n in names if n in knowledge.active().request_param_names)
         return env, request_params
 
 
@@ -1404,8 +1419,8 @@ class _FunctionEngine:
                 return combine((value, UNKNOWN))  # another scope may change it
             return value
         for qualified in self.ctx.scopes.resolve_name(name, node):
-            if qualified in SOURCE_NAMES:
-                return source(SOURCE_NAMES[qualified], node)
+            if qualified in knowledge.active().source_names:
+                return known_source(knowledge.active().source_names[qualified], node, ("source_name", qualified))
         if (
             not self.is_module
             and name in self.file.module_constants
@@ -1439,12 +1454,20 @@ class _FunctionEngine:
 
     def _attribute(self, node: ast.Attribute, env: Env) -> Taint:
         for qualified in self.ctx.resolve_all(node):
-            description = flask_request_source(qualified) or SOURCE_NAMES.get(qualified)
+            flask = flask_request_source(qualified)
+            if flask:
+                attr = qualified[len("flask.request.") :].split(".", 1)[0]
+                return known_source(flask, node, ("flask_request_attr", attr))
+            description = knowledge.active().source_names.get(qualified)
             if description:
-                return source(description, node)
+                return known_source(description, node, ("source_name", qualified))
         base = node.value
-        if node.attr in REQUEST_PARAM_ATTRS and self._is_request_object(base):
-            return source(f"request data (`{self.ctx.segment(node)}`)", node)
+        if node.attr in knowledge.active().request_param_attrs and self._is_request_object(base):
+            value = source(f"request data (`{self.ctx.segment(node)}`)", node)
+            holder = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
+            if from_note(("request_param_attr", node.attr)) or from_note(("request_param_name", holder)):
+                value = replace(value, mutable=True)
+            return value
         return self.eval(base, env)
 
     def _is_request_object(self, expr: ast.AST) -> bool:
@@ -1453,7 +1476,7 @@ class _FunctionEngine:
             return expr.id in self.request_params
         return (
             isinstance(expr, ast.Attribute)
-            and expr.attr in REQUEST_PARAM_NAMES
+            and expr.attr in knowledge.active().request_param_names
             and isinstance(expr.value, ast.Name)
             and expr.value.id in {"self", "cls"}
         )
@@ -1462,7 +1485,7 @@ class _FunctionEngine:
         value = self._call_value(node, env)
         if self.file.call_target(node) is None:
             return value
-        if self._sanitizer_names(node) & (SOURCE_NAMES.keys() | SANITIZERS.keys()):
+        if self._sanitizer_names(node) & (knowledge.active().source_names.keys() | SANITIZERS.keys()):
             return value
         # A linkable callee may return untrusted data of its own (resolved by `interproc`).
         return _with_symbol(value, ("ret", self.ctx.path, node.lineno, node.col_offset))
@@ -1483,8 +1506,8 @@ class _FunctionEngine:
         names = self.ctx.call_names(node)
         args = [self.eval(a, env) for a in _call_args(node)]
         for qualified in names:
-            if qualified in SOURCE_NAMES:
-                return source(SOURCE_NAMES[qualified], node)
+            if qualified in knowledge.active().source_names:
+                return known_source(knowledge.active().source_names[qualified], node, ("source_name", qualified))
         safe: set[str] = set()
         quoting = obj = numeric = False
         for qualified in self._sanitizer_names(node):
