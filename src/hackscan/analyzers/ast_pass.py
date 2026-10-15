@@ -132,7 +132,7 @@ def _to_finding(
         id="",
         vuln_class=classify(plugin.rule_id, plugin.cwe),
         rule_id=plugin.rule_id,
-        severity=plugin.severity,
+        severity=match.severity or plugin.severity,
         location=region,
         message=message,
         snippet=_line_snippet(ctx, start_line, end_line),

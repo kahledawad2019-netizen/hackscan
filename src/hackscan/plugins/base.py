@@ -35,6 +35,7 @@ class Match:
     # The value flowing into the sink (e.g. the query argument). When set and the rule's
     # class is modeled by the taint pass, taint decides confirm/suppress/keep.
     arg: ast.AST | None = None
+    severity: Severity | None = None  # None -> rule default
 
 
 class RulePlugin(ABC):
@@ -297,6 +298,17 @@ def first_arg(call: ast.Call, kw: str | None = None) -> ast.expr | None:
 
 
 # -- internals ----------------------------------------------------------------------------
+
+
+def same_binding(ctx: FileContext, name: ast.AST, at: ast.AST) -> bool:
+    """Whether `name` (an `ast.Name` anywhere in the file) denotes the same variable as the
+    name `name.id` at `at`, by Python's lexical rules (comprehension targets, class bodies,
+    `global`/`nonlocal`, closures). Flow-insensitive: the variable is the same, not
+    necessarily its value; use it to find evidence for a finding, never to dismiss one."""
+    if not isinstance(name, ast.Name):
+        return False
+    owner = ctx.scopes.binding_scope(name.id, at)
+    return owner is not None and ctx.scopes.binding_scope(name.id, name) is owner
 
 
 def _walk_same_scope(scope: ast.AST) -> Iterator[ast.AST]:

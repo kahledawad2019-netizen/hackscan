@@ -86,6 +86,27 @@ class ScopeIndex:
             scope = scope.parent
         return scope.node if scope is not None else None
 
+    def binding_scope(self, name: str, node: ast.AST) -> Scope | None:
+        """The scope whose binding of `name` is visible at `node` (None: unbound there)."""
+        scope: Scope | None = self.scope_of(node)
+        first = True
+        while scope is not None:
+            if isinstance(scope.node, ast.ClassDef) and not first:
+                scope = scope.parent  # class scope invisible to nested scopes
+                continue
+            first = False
+            if name in scope.globals_ and scope is not self.module:
+                return self.module if name in self.module.bindings else None
+            if name in scope.nonlocals:
+                scope = scope.parent
+                while scope is not None and not scope.is_function:
+                    scope = scope.parent
+                continue
+            if name in scope.bindings:
+                return scope
+            scope = scope.parent
+        return None
+
     def resolve_name(self, name: str, node: ast.AST) -> frozenset[str]:
         """All dotted paths `name` may refer to at `node`; empty for local values."""
         star: list[str] = []
