@@ -139,8 +139,8 @@ the `p/python` ruleset; CodeQL: `python-security-extended`; HackScan: no options
 
 | Tool | Version | TP | FP | FN | Precision | Recall | F1 |
 |---|---|---:|---:|---:|---:|---:|---:|
-| HackScan | 0.3.2 | 23 | 7 | 3 | 77% | 88% | 82% |
-| HackScan (confirmed only) | 0.3.2 | 17 | 3 | 9 | 85% | 65% | 74% |
+| HackScan | 0.4.0 | 23 | 7 | 3 | 77% | 88% | 82% |
+| HackScan (confirmed only) | 0.4.0 | 17 | 3 | 9 | 85% | 65% | 74% |
 | Bandit | bandit[sarif]==1.9.4 | 24 | 19 | 2 | 56% | 92% | 70% |
 | Semgrep CE | semgrep==1.180.0 (p/python sha256:31c1dfa46e8d) | 16 | 6 | 10 | 73% | 62% | 67% |
 | CodeQL | CodeQL 2.27.2 (codeql/python-queries@1.8.12, security-extended) | 20 | 1 | 6 | 95% | 77% | 85% |
@@ -223,7 +223,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: kahledawad2019-netizen/hackscan@v0.3.2
+      - uses: kahledawad2019-netizen/hackscan@v0.4.0
         with:
           path: src
           fail-on: high
@@ -255,7 +255,7 @@ Python 3.12 on the runner. Without the action:
 ```yaml
 repos:
   - repo: https://github.com/kahledawad2019-netizen/hackscan
-    rev: v0.3.2
+    rev: v0.4.0
     hooks:
       - id: hackscan
 ```
@@ -271,7 +271,8 @@ Every JSON and SARIF report names this contract (`hackscan-confirmation-v1`): JS
 confirmed finding, `assumed-flow` for a candidate whose possible flow is assumed), SARIF as
 the `confirmationBasis` / `confirmationContract` properties and the verdict sentence in the
 result message. The bracketed number in text output is a heuristic ranking score (0-100),
-not a probability or a measure of exploitability.
+not a probability or a measure of exploitability. Report consumers should tolerate added
+fields and read `status` / `confirmation_basis` rather than parse display text.
 
 **What `confirmed` means.** For injection findings, `confirmed` means HackScan establishes
 an abstract source-to-sink dependency using its supported operation models and function

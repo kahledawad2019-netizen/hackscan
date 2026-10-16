@@ -4,8 +4,8 @@ Generated 2026-10-16 by `benchmarks/run.py` on `benchmarks/suite/`: 26 vulnerabl
 
 | Tool | Version | TP | FP | FN | Precision | Recall | F1 |
 |---|---|---:|---:|---:|---:|---:|---:|
-| HackScan | 0.3.2 | 23 | 7 | 3 | 77% | 88% | 82% |
-| HackScan (confirmed only) | 0.3.2 | 17 | 3 | 9 | 85% | 65% | 74% |
+| HackScan | 0.4.0 | 23 | 7 | 3 | 77% | 88% | 82% |
+| HackScan (confirmed only) | 0.4.0 | 17 | 3 | 9 | 85% | 65% | 74% |
 | Bandit | bandit[sarif]==1.9.4 | 24 | 19 | 2 | 56% | 92% | 70% |
 | Semgrep CE | semgrep==1.180.0 (p/python sha256:31c1dfa46e8d) | 16 | 6 | 10 | 73% | 62% | 67% |
 | CodeQL | CodeQL 2.27.2 (codeql/python-queries@1.8.12, security-extended) | 20 | 1 | 6 | 95% | 77% | 85% |

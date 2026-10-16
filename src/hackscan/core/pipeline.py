@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from hackscan.analyzers.ast_pass import FileResult, analyze_file, analyze_source
-from hackscan.taint import knowledge
 from hackscan.analyzers.interproc import confirm_findings
 from hackscan.analyzers.llm_pass import LLMConfig, default_cache_dir, triage
 from hackscan.analyzers.remediate import generate_fixes
@@ -29,6 +28,7 @@ from hackscan.importers.common import SourceIndex
 from hackscan.importers.runner import ToolRun, collect
 from hackscan.plugins.base import RulePlugin
 from hackscan.plugins.loader import resolve_plugins
+from hackscan.taint import knowledge
 
 PARALLEL_THRESHOLD = 16  # below this many files, process start-up costs more than it saves
 
@@ -159,7 +159,9 @@ def _scan(target: Path, config: HackScanConfig) -> ScanResult:
         tool_runs=external.runs,
         knowledge_version=knowledge.active().version,
         knowledge_sha256=knowledge.active().sha256,
-        project_notes=sum(o == knowledge.PROJECT_NOTE for o in knowledge.active().provenance.values()),
+        project_notes=sum(
+            o == knowledge.PROJECT_NOTE for o in knowledge.active().provenance.values()
+        ),
     )
 
 

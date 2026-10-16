@@ -73,13 +73,15 @@ mature scanners, (3) taint-based confirmation, (4) optional local-LLM triage and
   findings *because* they are literals/calls — taint "constant input" dismissal never applies to them.
 - `--no-llm` disables Pass 3 and LLM fix generation. Deterministic template fixes (Pass 4 templates)
   still run unless `--no-fix`.
-- Output ordering is deterministic (path, line, col, rule_id).
+- Output ordering is deterministic: severity, status (confirmed first), confidence score
+  (descending), path, line, column, id.
 
 ## LLM Safety (Pass 3/4)
 - Scanned code is untrusted data: wrapped in delimited blocks, system prompt states it must not be
   followed as instructions; model output must match a JSON schema or is discarded.
-- LLM can only move status `candidate → confirmed|suppressed` with rationale; it cannot create findings
-  or raise severity above rule default.
+- LLM can only annotate a candidate (an assessment, never a confirmation: only an established
+  modelled flow confirms, README "Meaning of confirmation") or move it to `suppressed` with verified
+  evidence; it cannot create findings or raise severity above rule default.
 - LLM suppression requires independent evidence: the model must cite a specific line (sanitizer call,
   constant, guard) that a deterministic checker verifies exists in the code. Unverifiable rationale →
   finding stays `candidate` with the LLM note attached. LLM suppressions are labeled `llm:*` and can be
@@ -486,3 +488,26 @@ hackscan/
   held-out eval is identical to 0.3.1 on every finding, and the benchmark's HackScan numbers are
   unchanged (`test_published_hackscan_numbers_are_current`), so the tables keep the 0.3.0
   measurement (Bandit, Semgrep and CodeQL are not installed here to re-run every row).
+- 2026-10-16 (v0.4.0): what `confirmed` means, and the inputs behind it. (1) Terminal and text
+  output order by severity, status, confidence, location, id. (2) Untrusted-input knowledge is data
+  (`taint/knowledge.json`) with provenance; projects may add notes (`knowledge:` in `.hackscan.yml`,
+  rationale + evidence required, add-only, never suppress; `project-knowledge` switches them off);
+  JSON/SARIF record the knowledge version and hash. (3) Recall rules from the security agent's
+  development set: shell enabled through `**` options, libpq password-verifier helpers, a weak hash
+  of credential data is HIGH (CWE-916). (4) Step E, the confirmation contract
+  `hackscan-confirmation-v1` (README "Meaning of confirmation"): a finding is confirmed only when a
+  modelled source-to-sink flow is established under the documented assumptions; flows through
+  unmodelled calls, objects, possible aliases or library models that scanned code may replace are
+  assumed (candidates, never suppressed, the step named). Library-model dependencies are decided with
+  the whole scan (replacement facts: escapes of module objects, namespace writes, behaviour
+  attributes, shadowing modules; computed imports are a stated boundary); LLM triage annotates and
+  never confirms; JSON/SARIF carry the contract and each finding's confirmation basis; text shows a
+  heuristic `[score N]`. Codex reviewed E over 15 rounds; at the user's request Codex chose to state
+  the assumptions with a finite must-fix list (round-15 cases that are whole-analyzer approximations
+  are documented, not modelled), then "Step OK". Benchmark: confirmed-only 17/3/9 (a labelled-safe
+  `tar ... + shlex.quote(path)` with `shell=True` now confirms: `tar` is not an inert program, so
+  quoting earns no credit), other rows and the apps results unchanged. Security agent development set:
+  pooled precision@10 25/50, recall@10 25/25 (was 22/50, 22/25), confirmed 11 -> 3.
+  Compatibility: the Finding schema (version 1) is unchanged; JSON and SARIF gain fields
+  (consumers should tolerate extra keys) and messages/text output changed wording (do not parse
+  display text; use `status` and `confirmation_basis`).

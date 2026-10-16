@@ -15,10 +15,15 @@ from hackscan.sarif.generator import export_sarif
 from hackscan.taint import knowledge, sources
 from hackscan.taint.knowledge import BUILT_IN, PROJECT_NOTE, KnowledgeError
 
-CUSTOM = "import subprocess\nfrom myframework import incoming\n\nsubprocess.run(incoming.text, shell=True)\n"
-NOTE = ("knowledge:\n  - type: source_name\n    value: myframework.incoming.text\n"
-        "    description: body of an incoming message\n"
-        "    rationale: messages come from remote clients\n    evidence: app/handlers.py receive()\n")
+CUSTOM = (
+    "import subprocess\nfrom myframework import incoming\n\n"
+    "subprocess.run(incoming.text, shell=True)\n"
+)
+NOTE = (
+    "knowledge:\n  - type: source_name\n    value: myframework.incoming.text\n"
+    "    description: body of an incoming message\n"
+    "    rationale: messages come from remote clients\n    evidence: app/handlers.py receive()\n"
+)
 WHY = {"rationale": "comes from remote clients", "evidence": "synthetic test"}
 
 
@@ -30,17 +35,24 @@ def test_builtin_entries_are_marked_built_in():
 
 
 def test_compatibility_names_match_the_data():
-    assert sources.FLASK_REQUEST_ATTRS == knowledge.BUILTIN.flask_request_attrs
-    assert sources.SOURCE_NAMES == knowledge.BUILTIN.source_names
-    assert sources.ROUTE_DECORATORS == knowledge.BUILTIN.route_decorators
+    assert knowledge.BUILTIN.flask_request_attrs == sources.FLASK_REQUEST_ATTRS
+    assert knowledge.BUILTIN.source_names == sources.SOURCE_NAMES
+    assert knowledge.BUILTIN.route_decorators == sources.ROUTE_DECORATORS
 
 
 def test_project_notes_only_add_and_are_marked_as_such():
-    k = knowledge.BUILTIN.with_entries([
-        {"type": "source_name", "value": "x.y", "description": "mine", **WHY},
-        {"type": "source_name", "value": "sys.argv", "description": "renamed", **WHY},  # existing: kept as is
-        {"type": "route_decorator", "value": "endpoint", **WHY},
-    ])
+    k = knowledge.BUILTIN.with_entries(
+        [
+            {"type": "source_name", "value": "x.y", "description": "mine", **WHY},
+            {
+                "type": "source_name",
+                "value": "sys.argv",
+                "description": "renamed",
+                **WHY,
+            },  # existing: kept as is
+            {"type": "route_decorator", "value": "endpoint", **WHY},
+        ]
+    )
     assert k.details[("source_name", "x.y")] == WHY
     assert k.provenance[("source_name", "x.y")] == PROJECT_NOTE
     assert k.provenance[("route_decorator", "endpoint")] == PROJECT_NOTE
@@ -49,18 +61,21 @@ def test_project_notes_only_add_and_are_marked_as_such():
     assert knowledge.BUILTIN.source_names.keys() <= k.source_names.keys()
 
 
-@pytest.mark.parametrize("entry", [
-    {"type": "sanitizer", "value": "escape", **WHY},
-    {"type": "suppress", "value": "x", **WHY},
-    {"type": "source_name", "value": "", **WHY},
-    {"type": "source_name", "value": " x", **WHY},
-    {"type": "source_name", "value": "x", "provenance": "built-in", **WHY},
-    {"type": ["source_name"], "value": "x", **WHY},
-    {"type": "source_name", "value": "x", "rationale": "r"},
-    {"type": "source_name", "value": "x", "rationale": None, "evidence": []},
-    {"type": "source_name", "value": "x", "rationale": " ", "evidence": "e"},
-    "not a mapping",
-])
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"type": "sanitizer", "value": "escape", **WHY},
+        {"type": "suppress", "value": "x", **WHY},
+        {"type": "source_name", "value": "", **WHY},
+        {"type": "source_name", "value": " x", **WHY},
+        {"type": "source_name", "value": "x", "provenance": "built-in", **WHY},
+        {"type": ["source_name"], "value": "x", **WHY},
+        {"type": "source_name", "value": "x", "rationale": "r"},
+        {"type": "source_name", "value": "x", "rationale": None, "evidence": []},
+        {"type": "source_name", "value": "x", "rationale": " ", "evidence": "e"},
+        "not a mapping",
+    ],
+)
 def test_invalid_project_entries_are_refused(entry):
     with pytest.raises(KnowledgeError):
         knowledge.BUILTIN.with_entries([entry])
@@ -68,7 +83,9 @@ def test_invalid_project_entries_are_refused(entry):
 
 def test_project_entries_cannot_claim_built_in():
     with pytest.raises(KnowledgeError):
-        knowledge.BUILTIN.with_entries([{"type": "source_name", "value": "a.b", **WHY}], origin=BUILT_IN)
+        knowledge.BUILTIN.with_entries(
+            [{"type": "source_name", "value": "a.b", **WHY}], origin=BUILT_IN
+        )
 
 
 def test_config_parses_and_validates_knowledge(tmp_path: Path):
@@ -88,15 +105,19 @@ def test_config_parses_and_validates_knowledge(tmp_path: Path):
         load(tmp_path)
 
 
-ROUTE = ("import subprocess\nfrom flask import Flask\napp = Flask(__name__)\n\n"
-         "@app.route('/run/<cmd>')\ndef run(cmd):\n    subprocess.run(cmd, shell=True)\n")
+ROUTE = (
+    "import subprocess\nfrom flask import Flask\napp = Flask(__name__)\n\n"
+    "@app.route('/run/<cmd>')\ndef run(cmd):\n    subprocess.run(cmd, shell=True)\n"
+)
 
 
 def test_a_note_never_removes_a_route_parameter_source(tmp_path: Path):
     (tmp_path / "app.py").write_text(ROUTE)
     before = _statuses(tmp_path, HackScanConfig())
-    (tmp_path / ".hackscan.yml").write_text("knowledge:\n  - type: request_param_name\n    value: cmd\n"
-                                            "    rationale: r\n    evidence: e\n")
+    (tmp_path / ".hackscan.yml").write_text(
+        "knowledge:\n  - type: request_param_name\n    value: cmd\n"
+        "    rationale: r\n    evidence: e\n"
+    )
     assert before == {Status.CONFIRMED}
     assert _statuses(tmp_path, load(tmp_path)) == before
 
@@ -157,8 +178,11 @@ def test_outputs_record_the_knowledge_used(tmp_path: Path):
     (tmp_path / ".hackscan.yml").write_text(NOTE)
     result = scan(tmp_path, load(tmp_path))
     data = _json(result, result.findings)
-    assert data["tool"]["knowledge"] == {"version": knowledge.BUILTIN.version, "sha256": knowledge.BUILTIN.sha256,
-                                         "project_notes": 1}
+    assert data["tool"]["knowledge"] == {
+        "version": knowledge.BUILTIN.version,
+        "sha256": knowledge.BUILTIN.sha256,
+        "project_notes": 1,
+    }
     props = export_sarif(result)["runs"][0]["tool"]["driver"]["properties"]
     assert props["knowledgeSha256"] == knowledge.BUILTIN.sha256 and props["projectNotes"] == 1
     assert json.dumps(data)  # serialisable
@@ -171,25 +195,35 @@ def test_knowledge_file_is_packaged():
     assert "exclude" not in pyproject or "knowledge.json" not in pyproject
 
 
-FORMAT_CALL = ("import subprocess\nfrom myframework import incoming\n\n"
-               "parts = ['echo safe']\nincoming().format(parts)\nsubprocess.run(parts[0], shell=True)\n")
-FORMAT_ATTR = ("import subprocess\nfrom myframework import incoming\n\n"
-               "parts = ['echo safe']\nincoming.message.format(parts)\nsubprocess.run(parts[0], shell=True)\n")
+FORMAT_CALL = (
+    "import subprocess\nfrom myframework import incoming\n\n"
+    "parts = ['echo safe']\nincoming().format(parts)\nsubprocess.run(parts[0], shell=True)\n"
+)
+FORMAT_ATTR = (
+    "import subprocess\nfrom myframework import incoming\n\n"
+    "parts = ['echo safe']\nincoming.message.format(parts)\nsubprocess.run(parts[0], shell=True)\n"
+)
 
 
-@pytest.mark.parametrize("code, value", [(FORMAT_CALL, "myframework.incoming"),
-                                         (FORMAT_ATTR, "myframework.incoming.message")])
+@pytest.mark.parametrize(
+    "code, value",
+    [(FORMAT_CALL, "myframework.incoming"), (FORMAT_ATTR, "myframework.incoming.message")],
+)
 def test_a_noted_input_may_be_any_object_and_never_suppresses(tmp_path: Path, code, value):
     (tmp_path / "app.py").write_text(code)
     before = _statuses(tmp_path, HackScanConfig())
-    (tmp_path / ".hackscan.yml").write_text(f"knowledge:\n  - type: source_name\n    value: {value}\n"
-                                            "    rationale: r\n    evidence: e\n")
+    (tmp_path / ".hackscan.yml").write_text(
+        f"knowledge:\n  - type: source_name\n    value: {value}\n"
+        "    rationale: r\n    evidence: e\n"
+    )
     after = _statuses(tmp_path, load(tmp_path))
     assert Status.SUPPRESSED not in after and after, (before, after)
 
 
 def test_unknown_keys_of_mixed_types_give_a_config_error(tmp_path: Path):
-    (tmp_path / ".hackscan.yml").write_text("knowledge:\n  - type: source_name\n    value: x\n    rationale: r\n"
-                                            "    evidence: e\n    0: zero\n    typo: t\n")
+    (tmp_path / ".hackscan.yml").write_text(
+        "knowledge:\n  - type: source_name\n    value: x\n    rationale: r\n"
+        "    evidence: e\n    0: zero\n    typo: t\n"
+    )
     with pytest.raises(ConfigError):
         load(tmp_path)

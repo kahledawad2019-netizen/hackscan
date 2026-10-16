@@ -22,7 +22,13 @@ from typing import Any
 SCHEMA = "hackscan-knowledge/1"
 BUILT_IN = "built-in"
 PROJECT_NOTE = "project note"
-TYPES = ("flask_request_attr", "request_param_attr", "request_param_name", "source_name", "route_decorator")
+TYPES = (
+    "flask_request_attr",
+    "request_param_attr",
+    "request_param_name",
+    "source_name",
+    "route_decorator",
+)
 PROJECT_TYPES = frozenset(TYPES)  # every current type only ADDS untrusted input
 ENTRY_KEYS = {"type", "value", "description", "rationale", "evidence"}
 
@@ -40,7 +46,9 @@ class Knowledge:
     route_decorators: frozenset[str]
     version: str
     sha256: str  # of the packaged built-in file
-    provenance: dict[tuple[str, str], str] = field(default_factory=dict, compare=False)  # (type, value) -> origin
+    provenance: dict[tuple[str, str], str] = field(
+        default_factory=dict, compare=False
+    )  # (type, value) -> origin
     # (type, value) -> {"rationale": ..., "evidence": ...}, kept for every entry that was added
     details: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict, compare=False)
 
@@ -48,7 +56,10 @@ class Knowledge:
         """A copy with project entries added (never removing anything)."""
         if origin == BUILT_IN:
             raise KnowledgeError("project entries cannot claim built-in provenance")
-        parsed = [_entry(e, allowed=PROJECT_TYPES, where=f"{origin} {i + 1}") for i, e in enumerate(entries)]
+        parsed = [
+            _entry(e, allowed=PROJECT_TYPES, where=f"{origin} {i + 1}")
+            for i, e in enumerate(entries)
+        ]
         return _build(parsed, origin, base=self)
 
 
@@ -62,7 +73,9 @@ def _entry(raw: Any, *, allowed: frozenset[str], where: str) -> dict[str, Any]:
     if not isinstance(kind, str) or kind not in allowed:
         raise KnowledgeError(f"{where}: type must be one of {sorted(allowed)}")
     if not isinstance(value, str) or not value.strip() or value != value.strip():
-        raise KnowledgeError(f"{where}: value must be a non-empty string without surrounding spaces")
+        raise KnowledgeError(
+            f"{where}: value must be a non-empty string without surrounding spaces"
+        )
     description = raw.get("description")
     if description is not None and not isinstance(description, str):
         raise KnowledgeError(f"{where}: description must be a string")
@@ -70,12 +83,23 @@ def _entry(raw: Any, *, allowed: frozenset[str], where: str) -> dict[str, Any]:
         text = raw.get(key)
         if not isinstance(text, str) or not text.strip():
             raise KnowledgeError(f"{where}: `{key}` must be a non-empty string")
-    return {"type": kind, "value": value, "description": description,
-            "rationale": raw["rationale"].strip(), "evidence": raw["evidence"].strip()}
+    return {
+        "type": kind,
+        "value": value,
+        "description": description,
+        "rationale": raw["rationale"].strip(),
+        "evidence": raw["evidence"].strip(),
+    }
 
 
-def _build(entries: list[dict[str, Any]], origin: str, *, base: Knowledge | None = None,
-           version: str = "", sha256: str = "") -> Knowledge:
+def _build(
+    entries: list[dict[str, Any]],
+    origin: str,
+    *,
+    base: Knowledge | None = None,
+    version: str = "",
+    sha256: str = "",
+) -> Knowledge:
     sets: dict[str, set[str]] = {
         "flask_request_attr": set(base.flask_request_attrs) if base else set(),
         "request_param_attr": set(base.request_param_attrs) if base else set(),
@@ -97,23 +121,44 @@ def _build(entries: list[dict[str, Any]], origin: str, *, base: Knowledge | None
             sets[e["type"]].add(e["value"])
         provenance[key] = origin
         details[key] = {"rationale": e["rationale"], "evidence": e["evidence"]}
-    return Knowledge(frozenset(sets["flask_request_attr"]), frozenset(sets["request_param_attr"]),
-                     frozenset(sets["request_param_name"]), names, frozenset(sets["route_decorator"]),
-                     version or (base.version if base else ""), sha256 or (base.sha256 if base else ""), provenance,
-                     details)
+    return Knowledge(
+        frozenset(sets["flask_request_attr"]),
+        frozenset(sets["request_param_attr"]),
+        frozenset(sets["request_param_name"]),
+        names,
+        frozenset(sets["route_decorator"]),
+        version or (base.version if base else ""),
+        sha256 or (base.sha256 if base else ""),
+        provenance,
+        details,
+    )
 
 
 def load_builtin() -> Knowledge:
     raw = resources.files("hackscan.taint").joinpath("knowledge.json").read_bytes()
     data = json.loads(raw.decode("utf-8"))
-    if not isinstance(data, dict) or data.get("schema") != SCHEMA or not isinstance(data.get("entries"), list):
+    if (
+        not isinstance(data, dict)
+        or data.get("schema") != SCHEMA
+        or not isinstance(data.get("entries"), list)
+    ):
         raise KnowledgeError(f"built-in knowledge: expected schema {SCHEMA}")
-    entries = [_entry(e, allowed=frozenset(TYPES), where=f"built-in {i + 1}") for i, e in enumerate(data["entries"])]
-    return _build(entries, BUILT_IN, version=str(data.get("version", "")), sha256=hashlib.sha256(raw).hexdigest())
+    entries = [
+        _entry(e, allowed=frozenset(TYPES), where=f"built-in {i + 1}")
+        for i, e in enumerate(data["entries"])
+    ]
+    return _build(
+        entries,
+        BUILT_IN,
+        version=str(data.get("version", "")),
+        sha256=hashlib.sha256(raw).hexdigest(),
+    )
 
 
 BUILTIN = load_builtin()
-_active: contextvars.ContextVar[Knowledge] = contextvars.ContextVar("hackscan_knowledge", default=BUILTIN)
+_active: contextvars.ContextVar[Knowledge] = contextvars.ContextVar(
+    "hackscan_knowledge", default=BUILTIN
+)
 
 
 def active() -> Knowledge:
@@ -129,6 +174,8 @@ def restore(token: contextvars.Token) -> None:
     _active.reset(token)
 
 
-def for_config(entries: tuple[dict[str, Any], ...] | list[dict[str, Any]], enabled: bool) -> Knowledge:
+def for_config(
+    entries: tuple[dict[str, Any], ...] | list[dict[str, Any]], enabled: bool
+) -> Knowledge:
     """The knowledge a scan uses: the built-ins, plus project entries when they are enabled."""
     return BUILTIN.with_entries(list(entries)) if enabled and entries else BUILTIN

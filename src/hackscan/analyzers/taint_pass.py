@@ -32,28 +32,29 @@ from hackscan.analyzers.interproc import (
     ASSUMED,
     DROP,
     MODEL,
-    models_of,
-    digits,
-    join_marks,
-    quoted,
-    sanitized_for,
     CallSite,
     FileFacts,
     Flow,
     FunctionFacts,
     SymbolPair,
-    finding_key,
-    linkable_functions,
     _import_base,
+    digits,
+    finding_key,
+    join_marks,
+    linkable_functions,
+    models_of,
     module_name,
     module_symbols,
     outer_parts,
     parameters,
+    quoted,
+    sanitized_for,
 )
 from hackscan.core.models import ASSUMED_VERDICT, CONFIRMED_VERDICT, Evidence, Finding, Status
 from hackscan.core.taxonomy import CMDI, TAINT_CLASSES
 from hackscan.plugins.base import FileContext, Match
 from hackscan.plugins.scopes import COMPREHENSION_TYPES, FUNCTION_TYPES
+from hackscan.taint import knowledge
 from hackscan.taint.sanitizers import (
     INERT_PROGRAMS,
     NUMERIC_SANITIZERS,
@@ -61,7 +62,6 @@ from hackscan.taint.sanitizers import (
     SANITIZERS,
     SQL_OBJECT_SANITIZERS,
 )
-from hackscan.taint import knowledge
 from hackscan.taint.sources import flask_request_source, route_decorators_of
 
 PRODUCER = "taint"

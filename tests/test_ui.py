@@ -154,10 +154,21 @@ def test_terminal_order_puts_higher_confidence_first():
 
     result = scan(FRAMEWORKS, HackScanConfig())
     base = result.findings[0]
-    early = replace(base, id="hs1-early", message="EARLY-LOW", confidence=20, status=Status.CANDIDATE)
-    late = replace(base, id="hs1-late", message="LATE-HIGH", confidence=90, status=Status.CANDIDATE,
-                   location=replace(base.location, start_line=base.location.start_line + 50,
-                                    end_line=base.location.end_line + 50))
+    early = replace(
+        base, id="hs1-early", message="EARLY-LOW", confidence=20, status=Status.CANDIDATE
+    )
+    late = replace(
+        base,
+        id="hs1-late",
+        message="LATE-HIGH",
+        confidence=90,
+        status=Status.CANDIDATE,
+        location=replace(
+            base.location,
+            start_line=base.location.start_line + 50,
+            end_line=base.location.end_line + 50,
+        ),
+    )
     out = recorded(lambda c: render(c, result, [early, late], HackScanConfig()))
     assert out.index("LATE-HIGH") < out.index("EARLY-LOW")
     plain = _text(result, [early, late], HackScanConfig(), quiet=False)
