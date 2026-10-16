@@ -19,11 +19,12 @@ import string
 from collections.abc import Callable
 from dataclasses import replace
 
-from hackscan.core.models import Finding, Fix, FixEdit, Region, Status
+from hackscan.core.models import Finding, Fix, FixEdit, Region, Severity, Status
 from hackscan.core.taxonomy import CMDI, CODEI, SQLI, WEAK_CRYPTO
 from hackscan.importers.common import SourceIndex
 from hackscan.plugins.base import FileContext, first_arg, keyword
 from hackscan.plugins.loader import builtin_plugins
+from hackscan.plugins.rules.weak_crypto import credential_hash
 from hackscan.taint.sanitizers import INERT_PROGRAMS, program_name
 
 PRODUCER = "template"
@@ -119,6 +120,8 @@ def _fix_for(f: Finding, index: SourceIndex) -> Fix | None:
     call = _call_at(ctx, f.location)
     if call is None or ctx.has_secret_literal(call):
         return None  # a fix carries the call's real code, secrets included
+    if f.vuln_class == WEAK_CRYPTO and credential_fix_refused(f, call, ctx):
+        return None
     try:
         proposal = builder(call, ctx)
     except (ValueError, SyntaxError):
@@ -519,12 +522,21 @@ def _weak_crypto(call: ast.Call, ctx: FileContext):
         new_func = ctx.segment(func.value) + ".sha256"
         args = ", ".join(ctx.segment(a) for a in [*call.args, *call.keywords])
         return (
-            "Use SHA-256. If the hash is not security-relevant (e.g. a cache key), keep the "
-            "algorithm and pass usedforsecurity=False instead.",
+            "Use SHA-256 where the digest protects integrity or authenticity; every digest "
+            "changes, so stored or exchanged values need migrating. If the hash is not "
+            "security-relevant (a cache key, a file name), keep the algorithm and pass "
+            "usedforsecurity=False instead. Never use a fast digest for passwords.",
             f"{new_func}({args})",
             (),
         )
     return None
+
+
+def credential_fix_refused(f: Finding, call: ast.Call, ctx: FileContext) -> bool:
+    """Credential data (CWE-916): a slow, salted scheme and a migration of the stored hashes
+    are needed, not another fast digest swapped in by an edit. Decided from the call itself,
+    and from the severity too (HIGH or above, whatever merged it)."""
+    return credential_hash(call, ctx) or f.severity.rank >= Severity.HIGH.rank
 
 
 BUILDERS: dict[str, Callable] = {SQLI: _sqli, CMDI: _cmdi, CODEI: _codei, WEAK_CRYPTO: _weak_crypto}

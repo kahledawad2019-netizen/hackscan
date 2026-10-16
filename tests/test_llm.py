@@ -663,6 +663,34 @@ def test_llm_weak_crypto_fix_must_keep_exact_arguments(tmp_path, fixed, kept):
 
 
 @pytest.mark.parametrize(
+    ("code", "fixed"),
+    [
+        (
+            "import hashlib\n\ndef run(password):\n    return hashlib.md5(password.encode()).hexdigest()\n",
+            "hashlib.sha256(password.encode())",
+        ),
+        (
+            "import hashlib\n\ndef run(password):\n    h = hashlib.md5()\n"
+            "    h.update(password.encode())\n    return h.hexdigest()\n",
+            "hashlib.sha256()",
+        ),
+    ],
+    ids=["hashed directly", "hashed through update()"],
+)
+def test_llm_never_swaps_a_fast_digest_into_credential_hashing(tmp_path, code, fixed):
+    # A password needs a slow, salted scheme and a migration: no model-proposed fast digest.
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert f.fix is None
+
+
+def test_llm_prompt_forbids_fast_digests_for_credentials():
+    from hackscan.analyzers import llm_pass
+
+    assert "SHA-256 is not a\nfix there" in llm_pass.SYSTEM_PROMPT
+    assert llm_pass.PROMPT_VERSION == "4"
+
+
+@pytest.mark.parametrize(
     "fixed",
     [
         "os.system(pattern)",  # still vulnerable

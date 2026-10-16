@@ -12,7 +12,7 @@ import pytest
 from hackscan.analyzers.ast_pass import analyze_source
 from hackscan.analyzers.remediate import apply_edits, fix_diff, generate_fixes
 from hackscan.config import HackScanConfig
-from hackscan.core.models import Region, Status
+from hackscan.core.models import Region, Severity, Status
 from hackscan.core.pipeline import scan
 from hackscan.importers.common import SourceIndex
 from hackscan.plugins.loader import builtin_plugins
@@ -543,6 +543,99 @@ def test_md5_becomes_sha256(tmp_path: Path):
         tmp_path, "import hashlib\n\ndef f(d):\n    return hashlib.md5(d).hexdigest()\n"
     )
     assert "hashlib.sha256(d).hexdigest()" in new
+
+
+def test_sha256_fix_warns_about_migration_and_passwords(tmp_path: Path):
+    _, findings = fixes_for(
+        tmp_path, "import hashlib\n\ndef f(d):\n    return hashlib.md5(d).hexdigest()\n"
+    )
+    (f,) = findings
+    assert "migrating" in f.fix.description and "passwords" in f.fix.description
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "import hashlib\n\ndef f(password):\n    return hashlib.md5(password.encode()).hexdigest()\n",
+        "import hashlib\n\ndef f(user):\n    return hashlib.sha1(user.passwd).hexdigest()\n",
+    ],
+)
+def test_credential_hash_gets_guidance_not_an_edit(tmp_path: Path, code: str):
+    # A password needs a slow, salted password hash and a migration, not a faster digest.
+    _, findings = fixes_for(tmp_path, code)
+    (f,) = findings
+    assert f.severity.value == "high" and f.fix is None
+    assert "Argon2" in f.message and "PBKDF2" in f.message and "migrate" in f.message
+
+
+def _weak_hash_finding(tmp_path: Path, code: str):
+    (tmp_path / "m.py").write_text(code, encoding="utf-8")
+    (f,) = analyze_source(code, "m.py", builtin_plugins()).findings
+    return f
+
+
+def test_credential_call_refused_whatever_the_severity(tmp_path: Path):
+    # Decided from the call: a credential hash whose finding was lowered still gets no edit.
+    f = _weak_hash_finding(
+        tmp_path,
+        "import hashlib\n\ndef f(password):\n    return hashlib.md5(password).hexdigest()\n",
+    )
+    (out,) = generate_fixes([replace(f, severity=Severity.LOW)], SourceIndex(tmp_path))
+    assert out.fix is None
+
+
+def test_merged_critical_weak_hash_gets_no_edit(tmp_path: Path):
+    # Deduplication keeps the highest severity: HIGH or above is refused too.
+    f = _weak_hash_finding(
+        tmp_path, "import hashlib\n\ndef f(d):\n    return hashlib.md5(d).hexdigest()\n"
+    )
+    assert generate_fixes([f], SourceIndex(tmp_path))[0].fix is not None
+    (out,) = generate_fixes([replace(f, severity=Severity.CRITICAL)], SourceIndex(tmp_path))
+    assert out.fix is None
+
+
+def test_libpq_verifier_call_is_credential_hashing(tmp_path: Path):
+    # The verifier helpers hash credentials whatever their arguments are named.
+    from hackscan.analyzers.remediate import _call_at
+    from hackscan.plugins.rules.weak_crypto import credential_hash
+
+    code = (
+        "from psycopg2.extensions import encrypt_password\n\n"
+        "def f(secret, name):\n    return encrypt_password(secret, name)\n"
+    )
+    f = _weak_hash_finding(tmp_path, code)
+    ctx, _ = SourceIndex(tmp_path).context("m.py")
+    assert credential_hash(_call_at(ctx, f.location), ctx)
+
+
+@pytest.mark.parametrize(
+    ("code", "expected", "absent"),
+    [
+        (
+            "from psycopg2.extensions import encrypt_password\n\n"
+            "def f(secret, name):\n    return encrypt_password(secret, name)\n",
+            "algorithm='scram-sha-256' together with a connection or cursor as scope",
+            "b'scram-sha-256'",
+        ),
+        (
+            "def f(conn, secret, name):\n    return conn.pgconn.encrypt_password(secret, name, b'md5')\n",
+            "algorithm=b'scram-sha-256'",
+            "scope",
+        ),
+        (
+            "def f(conn, secret, name, alg):\n    return conn.pgconn.encrypt_password(secret, name, alg)\n",
+            "algorithm=b'scram-sha-256'",
+            "scope",
+        ),
+    ],
+    ids=["psycopg2 helper", "psycopg 3 literal md5", "psycopg 3 unknown algorithm"],
+)
+def test_libpq_verifier_guidance_matches_the_helper_api(
+    tmp_path: Path, code: str, expected: str, absent: str
+):
+    f = _weak_hash_finding(tmp_path, code)
+    assert expected in f.message and absent not in f.message
+    assert "set the credentials again" in f.message
 
 
 def test_from_import_md5_gets_no_fix(tmp_path: Path):

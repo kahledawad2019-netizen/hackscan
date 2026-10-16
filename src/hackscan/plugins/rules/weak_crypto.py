@@ -22,6 +22,7 @@ WEAK_CONSTRUCTORS = {f"hashlib.{alg}": alg for alg in WEAK_ALGORITHMS}
 PASSWORD_WORDS = ("password", "passwd", "passphrase", "pwd")
 # Verifier helpers: dotted name or `<x>.pgconn.encrypt_password`, and the position of `algorithm`.
 PSYCOPG2_ENCRYPT = "psycopg2.extensions.encrypt_password"
+PSYCOPG2_POSITION = 3  # (psycopg 3's `PGconn.encrypt_password` has it second, at 2)
 # Messages avoid "password <word>", which the secret redactor would treat as a value.
 VERIFIER_MD5 = "A PostgreSQL authentication verifier is built with MD5."
 VERIFIER_SERVER = (
@@ -31,6 +32,16 @@ VERIFIER_SERVER = (
 VERIFIER_UNKNOWN = (
     "A PostgreSQL authentication verifier may be built with MD5: the algorithm is not "
     "statically established."
+)
+# Remediation appended to a verifier message, per helper API (PostgreSQL 10+ for SCRAM); the
+# credentials must then be set again so stored MD5 verifiers are replaced.
+PSYCOPG2_GUIDANCE = (
+    " Pass algorithm='scram-sha-256' together with a connection or cursor as scope (psycopg2"
+    " needs it for SCRAM), then set the credentials again so stored MD5 verifiers are replaced."
+)
+PSYCOPG3_GUIDANCE = (
+    " Pass algorithm=b'scram-sha-256' (a bytes value), then set the credentials again so stored"
+    " MD5 verifiers are replaced."
 )
 
 
@@ -70,7 +81,9 @@ class WeakHash(RulePlugin):
         if any(_names_password(expr) for expr in _hashed_data(node, ctx)):
             yield Match(
                 node,
-                f"Weak hash algorithm {algorithm.upper()} is used on credential data (CWE-916).",
+                f"Weak hash algorithm {algorithm.upper()} is used on credential data (CWE-916): "
+                "use a slow, salted scheme made for credentials (Argon2, scrypt, bcrypt or "
+                "PBKDF2) and migrate the stored hashes (rehash at the next login).",
                 confidence,
                 severity=Severity.HIGH,
             )
@@ -116,6 +129,15 @@ def _hashed_data(call: ast.Call, ctx: FileContext) -> list[ast.expr]:
     return data
 
 
+def credential_hash(call: ast.Call, ctx: FileContext) -> bool:
+    """Whether `call` hashes credential data: a libpq verifier helper, or a hash whose data
+    names a password (the rule's CWE-916 evidence). Such a hash needs a slow, salted scheme and a
+    migration, so no fix may swap in another fast digest (template or LLM)."""
+    if _verifier_helper(call, ctx.call_names(call)) is not None:
+        return True
+    return any(_names_password(expr) for expr in _hashed_data(call, ctx))
+
+
 def _names_password(expr: ast.AST) -> bool:
     """Whether a name, attribute or identifier-like string key in `expr` names a password
     (`password`, `user.passwd`, `form["password"]`, `userPwd`)."""
@@ -140,7 +162,7 @@ def _names_password(expr: ast.AST) -> bool:
 def _verifier_helper(call: ast.Call, names: frozenset[str]) -> int | None:
     """Position of the `algorithm` argument when `call` is a libpq password-verifier helper."""
     if PSYCOPG2_ENCRYPT in names:
-        return 3  # encrypt_password(password, user, scope=None, algorithm=None)
+        return PSYCOPG2_POSITION  # encrypt_password(password, user, scope=None, algorithm=None)
     func = call.func
     if (
         isinstance(func, ast.Attribute)
@@ -156,15 +178,16 @@ def _verifier_match(call: ast.Call, position: int) -> Iterable[Match]:
     """MD5 when the algorithm is the literal md5; unknown (reported) when it is not a literal,
     when an earlier `*args` makes its position uncertain, or when it is missing or None (then
     the server's setting decides); nothing for another literal algorithm."""
+    guidance = PSYCOPG2_GUIDANCE if position == PSYCOPG2_POSITION else PSYCOPG3_GUIDANCE
     algorithm = keyword(call, "algorithm")
     if algorithm is None:
         if any(isinstance(a, ast.Starred) for a in call.args[: position + 1]):
-            yield Match(call, VERIFIER_UNKNOWN, 60, severity=Severity.HIGH)
+            yield Match(call, VERIFIER_UNKNOWN + guidance, 60, severity=Severity.HIGH)
             return
         if len(call.args) > position:
             algorithm = call.args[position]
     if algorithm is None or isinstance(algorithm, ast.Constant) and algorithm.value is None:
-        yield Match(call, VERIFIER_SERVER, 60, severity=Severity.HIGH)
+        yield Match(call, VERIFIER_SERVER + guidance, 60, severity=Severity.HIGH)
         return
     if isinstance(algorithm, ast.Constant) and isinstance(algorithm.value, (str, bytes)):
         value = algorithm.value
@@ -172,9 +195,9 @@ def _verifier_match(call: ast.Call, position: int) -> Iterable[Match]:
             value = value.decode("utf-8", errors="replace")
         if _normalize(value) != "md5":
             return
-        yield Match(call, VERIFIER_MD5, severity=Severity.HIGH)
+        yield Match(call, VERIFIER_MD5 + guidance, severity=Severity.HIGH)
         return
-    yield Match(call, VERIFIER_UNKNOWN, 60, severity=Severity.HIGH)
+    yield Match(call, VERIFIER_UNKNOWN + guidance, 60, severity=Severity.HIGH)
 
 
 def _is_str(node: ast.AST | None) -> bool:

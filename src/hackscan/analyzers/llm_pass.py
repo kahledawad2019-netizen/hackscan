@@ -40,6 +40,7 @@ from hackscan.analyzers.remediate import (
     _node_region,
     _strictly_contains,
     apply_edits,
+    credential_fix_refused,
 )
 from hackscan.core.models import Evidence, Finding, Fix, FixEdit, Status
 from hackscan.core.redact import redact_secretish
@@ -47,7 +48,7 @@ from hackscan.importers.common import SourceIndex
 from hackscan.plugins.base import FileContext
 
 PRODUCER = "llm"
-PROMPT_VERSION = "3"
+PROMPT_VERSION = "4"
 LLM_FALSE_POSITIVE = "llm:false_positive"
 CONFIRM_BOOST = 15
 DEFAULT_HOST = "http://localhost:11434"
@@ -90,7 +91,10 @@ Decide whether the finding is exploitable:
 
 If and only if the verdict is "true_positive", "fixed_call" may contain a safe
 replacement for exactly the flagged call expression (a single Python expression, same
-behavior for legitimate input); otherwise null.
+behavior for legitimate input); otherwise null. For a weak hash of credentials (data that
+names a password), "fixed_call" must be null: another fast digest such as SHA-256 is not a
+fix there; that code needs a slow, salted scheme (Argon2, scrypt, bcrypt or PBKDF2) and a
+migration of the stored hashes, which a person must decide.
 Reply with JSON only, matching the requested schema."""
 
 
@@ -610,6 +614,8 @@ def _llm_fix(finding: Finding, replacement: str, ctx: FileContext, rescan) -> Fi
     call = _call_at(ctx, finding.location)
     if call is None or ctx.has_secret_literal(call):
         return None  # a fix carries the call's real code, secrets included
+    if finding.vuln_class == "weak_crypto" and credential_fix_refused(finding, call, ctx):
+        return None  # credential data: no fast digest, whatever the model proposes
     if not ctx.scopes.safe_introduced_names(call, expr, sql_receiver=finding.vuln_class == "sqli"):
         return None
     before = rescan(ctx.source, ctx.path)

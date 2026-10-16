@@ -273,7 +273,8 @@ hackscan/
   reports; failed `--import` reports make the scan incomplete (exit 2); `--with` tools
   exiting with an error code are `partial` (warning, fails `--strict-tools`).
 - 2026-10-09 (M4a/M4b): template fixes (parameterized SQL with driver-specific placeholders,
-  argv lists instead of shell strings, `ast.literal_eval`, SHA-256) as validated exact edits;
+  argv lists instead of shell strings, `ast.literal_eval`, SHA-256 - since 0.4.2 only for
+  non-credential digests) as validated exact edits;
   `--no-fix`, `--show-fixes`. LLM triage is **opt-in** (`--llm`): candidates only, JSON-schema
   replies, per-request random code fence, redacted context, cache, `--llm-max`,
   `--llm-timeout`, bounded output tokens. LLM suppression requires evidence that a
@@ -531,3 +532,13 @@ hackscan/
   Benchmark: labelled suite unchanged (tables keep the 0.4.0 measurement); apps: vulpy 7 -> 6 reports,
   FP 3 -> 2. Security agent development set: pooled precision@10 25/50 -> 25/49, recall@10 25/25.
   Timing unchanged (datasette ~52 s, pgadmin4 ~63 s).
+- 2026-10-16 (v0.4.2): weak-hash remediation. A weak hash of credential data (CWE-916) gets no
+  automatic edit from the template or the LLM path (`credential_fix_refused`: the call's own
+  credential evidence - hashed data naming a password, or a libpq verifier helper - or severity HIGH
+  or above after merging); its message gives the remedy (a slow, salted scheme: Argon2, scrypt,
+  bcrypt or PBKDF2, and a migration of stored hashes). The SHA-256 suggestion for other digests warns
+  about migrating stored values and never using a fast digest for passwords. The libpq verifier
+  messages give API-correct SCRAM guidance (psycopg2: algorithm='scram-sha-256' with a connection or
+  cursor scope; psycopg 3: algorithm=b'scram-sha-256'). LLM prompt version 4 forbids fast-digest
+  fixes for credentials. Found by Codex in the creative-plan review; Codex review 3 rounds, "Step OK".
+  Benchmarks unchanged.

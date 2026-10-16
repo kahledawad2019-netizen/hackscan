@@ -24,7 +24,7 @@ HIGH     confirmed  views.py:10:9  HS-SQLI-001  [score 100]
 | **Across functions and files** | A sink fed by a function parameter is confirmed when a caller anywhere in the scanned code passes untrusted data (directly or through other functions), or when a called function returns it; the trace names the source file and line. |
 | **Framework-aware** | Sources: Flask `request.*`, Django/DRF/Starlette/FastAPI request objects (incl. `self.request`), route-handler parameters, `input()`, `sys.argv`. |
 | **One report from many tools** | Imports Semgrep, Bandit, CodeQL (SARIF) and Gitleaks; deduplicates by vulnerability class and location, keeping every tool as provenance. |
-| **Fixes you can apply** | Mechanical, validated fix suggestions: parameterized queries (driver-aware placeholders), argument lists instead of shell strings, `ast.literal_eval`, SHA-256. Each is an exact edit that re-parses; ambiguous cases get no fix rather than a wrong one. |
+| **Fixes you can apply** | Mechanical, validated fix suggestions: parameterized queries (driver-aware placeholders), argument lists instead of shell strings, `ast.literal_eval`, SHA-256 for non-password digests (a password hash gets guidance instead: Argon2, scrypt, bcrypt or PBKDF2, with a migration). Each is an exact edit that re-parses; ambiguous cases get no fix rather than a wrong one. |
 | **Optional local-LLM triage** | `--llm` asks a local Ollama model about remaining candidates. Its assessment is attached to the finding (it never confirms one), and it may only suppress by citing a line that HackScan verifies itself (an allow-list guard, constant or sanitizer that holds on every path). Code is treated as untrusted data; secrets are redacted. |
 | **CI-ready** | SARIF 2.1.0 (validated against the OASIS schema) for GitHub code scanning, `--fail-on` exit codes, stable fingerprints that survive code moves. |
 
@@ -174,7 +174,7 @@ HackScan's authors, so treat both tables as a sanity check rather than a ranking
 | `HS-SQLI-001` | Non-constant SQL reaching DB-API `execute*`, Django `raw`, SQLAlchemy `text`, pandas `read_sql` | high |
 | `HS-CMDI-001` | Non-constant commands reaching `os.system`, `os.popen`, `subprocess.*(shell=True)`, ... | high |
 | `HS-CODEI-001` | Non-constant input to `eval`, `exec`, `compile` | high |
-| `HS-CRYPTO-001` | MD5/SHA-1 (unless `usedforsecurity=False`) | low |
+| `HS-CRYPTO-001` | MD5/SHA-1 (unless `usedforsecurity=False`); PostgreSQL MD5 authentication verifiers | low; high on credential data (CWE-916) and for the verifiers |
 
 Sanitizers recognized: numeric/UUID conversions (all classes), `psycopg` `sql.Identifier`
 /`sql.Literal` (SQL). `shlex.quote` is POSIX-only, so quoted commands are kept as
@@ -223,7 +223,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: kahledawad2019-netizen/hackscan@v0.4.1
+      - uses: kahledawad2019-netizen/hackscan@v0.4.2
         with:
           path: src
           fail-on: high
@@ -255,7 +255,7 @@ Python 3.12 on the runner. Without the action:
 ```yaml
 repos:
   - repo: https://github.com/kahledawad2019-netizen/hackscan
-    rev: v0.4.1
+    rev: v0.4.2
     hooks:
       - id: hackscan
 ```
