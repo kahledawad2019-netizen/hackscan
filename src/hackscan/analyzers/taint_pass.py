@@ -103,6 +103,30 @@ NON_ESCAPING_CALLS = frozenset(
 # Builtins whose result is derived only from their arguments.
 # Pure builtins returning a new string.
 STR_BUILTINS = frozenset({"str", "repr", "format", "ascii"})
+# Builtins returning a new text, bytes or number, never a reference to an argument.
+NEW_VALUE_BUILTINS = frozenset(
+    {
+        *(
+            prefix + name
+            for prefix in ("", "builtins.")
+            for name in (
+                "str",
+                "repr",
+                "format",
+                "ascii",
+                "bytes",
+                "len",
+                "int",
+                "float",
+                "bool",
+                "abs",
+                "round",
+                "hash",
+                "id",
+            )
+        )
+    }
+)
 PURE_BUILTINS = frozenset(
     {"str", "repr", "format", "ascii", "bytes", "tuple", "sorted", "frozenset"}
 )
@@ -251,7 +275,41 @@ PRESERVING_FUNCTIONS: dict[str, tuple[tuple[int, ...] | None, tuple[str, ...]]] 
     "os.fspath": ((0,), ("path",)),
     "posixpath.join": (None, ()),
     "ntpath.join": (None, ()),
+    # Path objects hold their parts' text (the constructors; methods are not modelled).
+    "pathlib.Path": (None, ()),
+    "pathlib.PurePath": (None, ()),
+    "pathlib.PurePosixPath": (None, ()),
+    "pathlib.PureWindowsPath": (None, ()),
+    "pathlib.PosixPath": (None, ()),
+    "pathlib.WindowsPath": (None, ()),
 }
+# Library models returning a text or bytes (`re.subn`: with a count) that depends on their
+# arguments alone (not on the environment, the working directory, the file system or the
+# clock): called with constants only, they return a constant (`os.path.join(".", "app.log")`).
+# Not `abspath` or `expanduser`, and not the `pathlib` constructors: the methods of a path
+# object read the file system, and methods of a constant are otherwise taken as constant.
+PURE_MODELS = frozenset(
+    {
+        "os.path.join",
+        "posixpath.join",
+        "ntpath.join",
+        "os.path.normpath",
+        "os.fspath",
+        "urllib.parse.unquote",
+        "urllib.parse.unquote_plus",
+        "urllib.parse.unquote_to_bytes",
+        "html.unescape",
+        "re.sub",
+        "re.subn",
+        "base64.b64decode",
+        "base64.urlsafe_b64decode",
+        "base64.standard_b64decode",
+        "base64.b32decode",
+        "base64.b16decode",
+        "binascii.unhexlify",
+        "binascii.a2b_base64",
+    }
+)
 
 
 # One name per library model (the same function under another module name).
@@ -345,6 +403,10 @@ class Taint:
     # not run its operands or input as code (see `starts_with_program`). Shell-quoting credit
     # needs it: a quoted value in the program position is the program itself.
     program_start: bool = False
+    # A container whose elements are known to refer to no mutable object (a list, set or dict
+    # display of strings, numbers, tuples of them): an item taken out of it cannot be changed
+    # in place, so passing the item on does not change the container (see `item_of`).
+    items_immutable: bool = False
 
     @property
     def is_constant(self) -> bool:
@@ -360,7 +422,7 @@ def combine(values: Iterable[Taint]) -> Taint:
     sources: set[Source] = set()
     symbols: set[SymbolPair] = set()
     unknown = mutable = quote_sanitized = sql_object = False
-    shell_plain = container = number = program_start = True
+    shell_plain = container = number = program_start = items_immutable = True
     count = 0
     safe = set(TAINT_CLASSES)
     for v in values:
@@ -375,6 +437,7 @@ def combine(values: Iterable[Taint]) -> Taint:
         container = container and v.container
         number = number and v.number
         program_start = program_start and v.program_start
+        items_immutable = items_immutable and v.items_immutable
         count += 1
     return Taint(
         frozenset(sources),
@@ -388,6 +451,8 @@ def combine(values: Iterable[Taint]) -> Taint:
         container=container and count > 0,
         number=number and count > 0,
         program_start=program_start and count > 0,
+        # (anything joined into a container, an element stored in it included, must keep it)
+        items_immutable=items_immutable and count > 0,
     )
 
 
@@ -489,9 +554,14 @@ def starts_with_program(text: str) -> bool:
 def item_of(value: Taint) -> Taint:
     """An item of an iterable (a character of a string, an element of a container): not the
     quoted whole, and not itself known to be a container. Only a container's elements
-    (whole literals) keep the program flag; a character names no program."""
+    (whole literals) keep the program flag; a character names no program. An element of a
+    container whose elements refer to no mutable object is not a mutable object itself."""
     return replace(
-        unquote(value), container=False, program_start=value.program_start and value.container
+        unquote(value),
+        container=False,
+        program_start=value.program_start and value.container,
+        mutable=value.mutable and not (value.container and value.items_immutable),
+        items_immutable=False,
     )
 
 
@@ -1157,9 +1227,15 @@ class _FunctionEngine:
             else:  # arithmetic, like the BinOp case
                 value = unquote(combine((current, value)))
             if current.mutable and isinstance(stmt.target, ast.Name):
-                self._weak_update(stmt.target.id, value, env)  # in-place `+=` on lists
-            else:
+                # In-place `+=` on lists stores what it adds (`rows += [parts]`): those objects
+                # may be changed through the list later, as with `rows.append(parts)`.
+                for name in self._stored_names(stmt.value, env):
+                    self._union(stmt.target.id, name)
+                self._weak_update(stmt.target.id, value, env)
+            elif isinstance(stmt.target, ast.Name):
                 self._assign(stmt.target, value, env, None)
+            else:  # `obj.x += [parts]` stores into another object: it escapes, as with `=`
+                self._assign(stmt.target, value, env, stmt.value)
         elif isinstance(stmt, (ast.Return, ast.Raise)):
             if self.track_returns and isinstance(stmt, ast.Return) and stmt.value is not None:
                 value = local_object(self.eval(stmt.value, env))
@@ -1293,12 +1369,18 @@ class _FunctionEngine:
         elif isinstance(target, (ast.Tuple, ast.List)):
             for elt in target.elts:  # parts of the value (characters of a string)
                 self._assign(elt, item_of(value), env, value_expr)
-        elif isinstance(target, ast.Starred):
-            self._assign(target.value, value, env, value_expr)  # inside a Tuple/List
+        elif isinstance(target, ast.Starred):  # inside a Tuple/List: a new list of the items
+            fresh = replace(value, mutable=True, container=True, items_immutable=False)
+            self._assign(target.value, fresh, env, value_expr)
         elif isinstance(target, (ast.Attribute, ast.Subscript)):
             base = _root_name(target)
+            item_store = (
+                base is not None
+                and isinstance(target, ast.Subscript)
+                and self.eval(target.value, env).container
+            )
             if base is not None:  # obj.x = v / d[k] = v: weak update of the container
-                if isinstance(target, ast.Attribute) or not self.eval(target.value, env).container:
+                if not item_store:
                     # Objects are tracked as a whole (not field by field): that a later read
                     # or method of `obj` returns this value is assumed, not established. A
                     # container's own item store (`d[k] = v`) is modelled.
@@ -1306,8 +1388,12 @@ class _FunctionEngine:
                     value = assume(value, f"a store into `{base}` ({self.ctx.path}:{line})")
                 self._weak_update(base, value, env)
             if value_expr is not None:  # storing a mutable elsewhere lets it escape
+                # (what is stored is decided before the escape changes it)
+                stored = self._stored_names(value_expr, env) if item_store else []
                 for name in self._mutable_names_in(value_expr, env):
                     self._weak_update(name, UNKNOWN, env)
+                for name in stored:  # and the container now refers to it (`d[k] = parts`)
+                    self._union(base, name)  # type: ignore[arg-type]
 
     # -- in-order scan: sinks, walrus, mutation and escape -------------------------------
 
@@ -1453,6 +1539,8 @@ class _FunctionEngine:
     def _call_effects(self, call: ast.Call, env: Env) -> None:
         args = _call_args(call)
         func = call.func
+        holders: list[str] = []  # receivers that may keep a reference to the arguments
+        stored: list[str] = []  # constant mutable objects the arguments may store
         # Mutating method on a mutable receiver: `parts.append(x)`, `d.setdefault(k, x)`.
         if isinstance(func, ast.Attribute) and func.attr not in READONLY_METHODS:
             # The receiver may be any object named in it: `d.get(k).append(x)` mutates d,
@@ -1474,14 +1562,19 @@ class _FunctionEngine:
                     else assume(self.eval(a, env), via)
                     for i, a in enumerate(args)
                 )
-                if (
-                    func.attr not in MUTATOR_METHODS
-                    or not self.eval(func.value, env).container  # `boxes[0].update(x)`
-                    or not all(env[n].container for n in receivers if n in env)
-                ):
+                container_store = (
+                    func.attr in MUTATOR_METHODS
+                    and self.eval(func.value, env).container  # not `boxes[0].update(x)`
+                    and all(env[n].container for n in receivers if n in env)
+                )
+                if not container_store:
                     # Only a container's own mutators (`parts.append(x)`) are modelled; any
                     # other method may or may not store its arguments: assumed.
                     value = assume(value, via)
+                else:  # (an object is read as a whole: its reads stay unknown)
+                    holders = sorted(receivers)
+                    # what is stored is decided now, before the escape below changes it
+                    stored = sorted({n for a in args for n in self._stored_names(a, env)})
                 for name in sorted(receivers):
                     self._weak_update(name, value, env)
         # Mutable arguments escaping into code we do not model may be changed by it.
@@ -1491,11 +1584,16 @@ class _FunctionEngine:
             and func.attr in STRING_METHODS
             and not self.eval(func.value, env).mutable
         )
-        if names & (NON_ESCAPING_CALLS | SANITIZERS.keys()) or is_string_method:
-            return
-        for arg in args:
-            for name in self._mutable_names_in(arg, env):
-                self._weak_update(name, UNKNOWN, env)
+        if not (names & (NON_ESCAPING_CALLS | SANITIZERS.keys()) or is_string_method):
+            for arg in args:
+                for name in self._mutable_names_in(arg, env):
+                    self._weak_update(name, UNKNOWN, env)
+        # The receiver may now refer to the mutable arguments (`rows.append(parts)`), so a later
+        # change through either name changes what the other refers to. (Linked after the
+        # escape above: storing alone does not make the receiver unknown.)
+        for holder in holders:
+            for name in stored:
+                self._union(holder, name)
 
     # -- aliasing ------------------------------------------------------------------------
 
@@ -1503,6 +1601,8 @@ class _FunctionEngine:
         return self.groups.get(name, {name})
 
     def _union(self, a: str, b: str) -> None:
+        if b in self._group(a):  # already one group (loops repeat the same links)
+            return
         merged = self._group(a) | self._group(b)
         for n in merged:
             self.groups[n] = merged
@@ -1514,7 +1614,11 @@ class _FunctionEngine:
         for n in self._group(name):
             if n in env:  # the same object, changed in place: still a container (or not)
                 part = value if n == name else alias
-                env[n] = replace(combine((env[n], part)), container=env[n].container)
+                # (what was stored may itself be a mutable object: its elements are no longer
+                # known to be immutable)
+                env[n] = replace(
+                    combine((env[n], part)), container=env[n].container, items_immutable=False
+                )
 
     def _mutable_names_in(self, expr: ast.AST, env: Env) -> list[str]:
         """Local names anywhere in `expr` that may hold a mutable object. Calls are included:
@@ -1528,6 +1632,40 @@ class _FunctionEngine:
             elif not isinstance(node, FUNCTION_TYPES):
                 stack.extend(ast.iter_child_nodes(node))
         return out
+
+    def _stored_names(self, expr: ast.AST, env: Env) -> list[str]:
+        """Local names of mutable objects that storing the value of `expr` may store by
+        reference: the names themselves, inside displays and alternatives, the object a
+        subscript or attribute reads from, and anything an unmodelled call may return. Not a
+        new text or number built from them (`" ".join(parts)`, `str(parts)`, an f-string)."""
+        out = []
+        stack = [expr]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, ast.Name):
+                # Only an object a suppression could rely on matters (a constant, or one
+                # sanitized for some class): storing anything else already makes the container
+                # unsuppressible, and what an alias adds later is only assumed.
+                if node.id in env and env[node.id].mutable and env[node.id].safe_for:
+                    out.append(node.id)
+            elif isinstance(
+                node, (ast.Constant, ast.JoinedStr, ast.Compare, ast.UnaryOp, *FUNCTION_TYPES)
+            ):
+                continue  # a new text, bool or number, or a function object
+            elif isinstance(node, ast.Call) and self._returns_new_text(node, env):
+                continue
+            else:  # (keywords and comprehensions included: `dict(k=parts)`, `[p for p in x]`)
+                stack.extend(ast.iter_child_nodes(node))
+        return out
+
+    def _returns_new_text(self, call: ast.Call, env: Env) -> bool:
+        """`str(x)`, `len(x)`, `" ".join(x)`, `template.format(x)`: a builtin or string method
+        that returns a new text or number, never one of its arguments."""
+        func = call.func
+        if isinstance(func, ast.Attribute):
+            return func.attr in STRING_METHODS and not self.eval(func.value, env).mutable
+        names = self.ctx.call_names(call)
+        return bool(names) and names <= NEW_VALUE_BUILTINS and self.file.stable_callee(call)
 
     # -- expressions -----------------------------------------------------------------------
 
@@ -1633,8 +1771,20 @@ class _FunctionEngine:
         if isinstance(node, ast.Attribute):
             # Any object's attribute, rendered as anything (`str("x".__class__)`); of a
             # sanitized value, maybe its raw data (`uuid.UUID(x).bytes`, `.wrapped`).
-            value = drop_credit(self._attribute(node, env))
-            return replace(value, shell_plain=False, program_start=False)
+            known = self._attribute_source(node)
+            if known is not None:  # the untrusted data itself (`sys.stdin`, `request.files`)
+                return replace(drop_credit(known), shell_plain=False, program_start=False)
+            # Otherwise it may be any object, a mutable one too (`sql.Literal([...]).wrapped`
+            # is that list).
+            return replace(
+                drop_credit(self.eval(node.value, env)),
+                shell_plain=False,
+                program_start=False,
+                mutable=True,
+                container=False,
+                items_immutable=False,
+                number=False,
+            )
         if isinstance(node, ast.Subscript):
             value = self.eval(node.value, env)
             index = self.eval(node.slice, env)
@@ -1709,11 +1859,20 @@ class _FunctionEngine:
             if isinstance(node, ast.GeneratorExp):
                 # Produced when consumed, possibly after its free names were rebound.
                 return combine((value, UNKNOWN))
-            return replace(value, mutable=True, shell_plain=False, container=True)  # ['x']
+            # (its elements are values of `elt`, of any kind: not known to be immutable)
+            return replace(
+                value, mutable=True, shell_plain=False, container=True, items_immutable=False
+            )  # ['x']
         if isinstance(node, (ast.List, ast.Set, ast.Dict)):
             children = [c for c in ast.iter_child_nodes(node) if isinstance(c, ast.expr)]
             value = combine(self.eval(c, env) for c in children)
-            return replace(value, mutable=True, shell_plain=False, container=True)  # ['x']
+            return replace(
+                value,
+                mutable=True,
+                shell_plain=False,
+                container=True,  # ['x']
+                items_immutable=_immutable_elements(node),
+            )
         if isinstance(node, (ast.Lambda, ast.Yield, ast.YieldFrom)):
             return UNKNOWN
         if isinstance(
@@ -1722,7 +1881,12 @@ class _FunctionEngine:
             children = [c for c in ast.iter_child_nodes(node) if isinstance(c, ast.expr)]
             value = combine(self.eval(c, env) for c in children) if children else CONST
             if isinstance(node, ast.Tuple):  # renders as `('x',)`
-                return replace(value, shell_plain=False, container=True)
+                return replace(
+                    value,
+                    shell_plain=False,
+                    container=True,
+                    items_immutable=_immutable_elements(node),
+                )
             return value
         return UNKNOWN
 
@@ -1773,12 +1937,30 @@ class _FunctionEngine:
                 ]
                 if len(binders) == 1 and not self._mutates_targets(scope.node):
                     # an item of the iterable (a character of a string), never the whole
-                    return item_of(self.eval(binders[0].iter, env))
+                    value = item_of(self.eval(binders[0].iter, env))
+                    starred = (
+                        node
+                        for s in ast.walk(binders[0].target)
+                        if isinstance(s, ast.Starred)
+                        for node in ast.walk(s)
+                    )
+                    if any(isinstance(n, ast.Name) and n.id == name for n in starred):
+                        # `for *rest, in rows`: a new list of items
+                        value = replace(value, mutable=True, container=True, items_immutable=False)
+                    return value
                 return UNKNOWN  # rebound by a later `for`: which one applies depends on order
             scope = scope.parent
         return None
 
     def _attribute(self, node: ast.Attribute, env: Env) -> Taint:
+        """The attribute as a recognized source, or else its object's value (a method's
+        receiver: `" ".join` is the string)."""
+        known = self._attribute_source(node)
+        return known if known is not None else self.eval(node.value, env)
+
+    def _attribute_source(self, node: ast.Attribute) -> Taint | None:
+        """A recognized untrusted source named by the attribute itself (`request.args`,
+        `sys.stdin`, a request parameter's data attribute), or None."""
         for qualified in self.ctx.resolve_all(node):
             flask = flask_request_source(qualified)
             if flask:
@@ -1796,7 +1978,7 @@ class _FunctionEngine:
             ):
                 value = replace(value, mutable=True)
             return value
-        return self.eval(base, env)
+        return None
 
     def _request_data_expr(self, expr: ast.AST) -> bool:
         """Whether `expr`, a method, is the request's own data method (`request.get_json`,
@@ -1951,6 +2133,10 @@ class _FunctionEngine:
             # namespace: `json.__dict__`, `globals()`): the result carries the data
             # arguments' data (established); any other argument (an option, a callback) may
             # still flow on, assumed. No sanitizer credit.
+            if names <= PURE_MODELS and all(a.is_constant for a in args):
+                # Every argument (options included) is a constant: so is the result, as text
+                # that may hold any character (a separator, a decoded quote).
+                return Taint(shell_plain=False)
             via = f"`{min(names)}` ({self.ctx.path}:{node.lineno}) beyond its data arguments"
             # (the flow depends on the models: `MODEL` marks, added in `_call`)
             value = combine((UNKNOWN, *_data_arguments(node, args, modelled, via)))
@@ -2051,7 +2237,9 @@ class _FunctionEngine:
             elif func.attr == "__iadd__" and receiver.container:
                 value = combine((receiver, *args))  # the container itself, extended
             else:
+                # (any object, a new list too: `"a b".split()`)
                 value = combine((assume(receiver, via), *[assume(a, via) for a in args]))
+                value = replace(value, mutable=True, items_immutable=False)
             value = drop_credit(unquote(value))
             return replace(value, shell_plain=False, number=False, program_start=False)
         if self._sanitizer_names(node) & NUMERIC_PASSTHROUGH:
@@ -2076,17 +2264,20 @@ class _FunctionEngine:
                 for i, a in enumerate(args)
             ]
         if names & MUTABLE_BUILTINS:
-            value = combine(args) if args else CONST
+            # (a built container's elements are not known to be immutable: `dict(k=[...])`)
+            value = replace(combine(args) if args else CONST, items_immutable=False)
             if names & CHAR_BUILTINS:
                 value = drop_credit(value)  # bytearray: bytes, not a container of elements
                 return replace(value, mutable=True, shell_plain=False)
             return replace(value, mutable=True, shell_plain=False, container=True)
         if names & PURE_BUILTINS:
-            value = combine(args) if args else CONST
+            value = replace(combine(args) if args else CONST, items_immutable=False)
             if names & CHAR_BUILTINS:
                 value = drop_credit(value)
             if names & STR_BUILTINS:  # a new string: not the (maybe mutable) argument
                 value = replace(value, mutable=False)
+            elif names & {"sorted", "builtins.sorted"}:  # a new list
+                value = replace(value, mutable=True)
             if names == {"str"}:
                 # A string as is. Values that render with quotes (bytes, containers) are
                 # already not shell_plain; str(b, encoding) decodes bytes, likewise.
@@ -2710,6 +2901,27 @@ def _format_fields(template: str) -> set | None:
     except ValueError:
         return None
     return used
+
+
+def _immutable_elements(display: ast.expr) -> bool:
+    """Whether every element of a list, set, dict or tuple display is established to refer to
+    no mutable object, by its syntax: a literal, an f-string, or a tuple or operator of such.
+    Not a name or a call: its value may be any object (`"a b".split()` is a list)."""
+
+    def immutable(node: ast.expr | None) -> bool:
+        if isinstance(node, (ast.Constant, ast.JoinedStr)):
+            return True
+        if isinstance(node, ast.Tuple):
+            return all(immutable(e) for e in node.elts)
+        if isinstance(node, ast.UnaryOp):
+            return immutable(node.operand)
+        if isinstance(node, ast.BinOp):
+            return immutable(node.left) and immutable(node.right)
+        return False  # (a starred part or `**`: not looked into)
+
+    if isinstance(display, ast.Dict):
+        return all(immutable(k) for k in display.keys) and all(immutable(v) for v in display.values)
+    return all(immutable(e) for e in getattr(display, "elts", ()))
 
 
 def _plain_position(node: ast.Call, index: int) -> bool:

@@ -7,9 +7,9 @@
       "complete": true,
       "tools": {
         "HackScan": {
-          "reports": 7,
+          "reports": 6,
           "tp": 4,
-          "fp": 3,
+          "fp": 2,
           "vulns": 4,
           "unreviewed": 0
         },

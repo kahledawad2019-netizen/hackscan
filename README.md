@@ -153,7 +153,7 @@ vulnerabilities any tool found ([details](benchmarks/APPS.md)):
 
 | Tool | Reports | TP | FP | Vulns found | Precision | Relative recall |
 |---|---:|---:|---:|---:|---:|---:|
-| HackScan | 18 | 15 | 3 | 15 | 83% | 71% |
+| HackScan | 17 | 15 | 2 | 15 | 88% | 71% |
 | HackScan (confirmed only) | 6 | 6 | 0 | 6 | 100% | 29% |
 | Bandit | 32 | 16 | 16 | 16 | 50% | 76% |
 | Semgrep CE | 12 | 11 | 1 | 11 | 92% | 52% |
@@ -223,7 +223,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: kahledawad2019-netizen/hackscan@v0.4.0
+      - uses: kahledawad2019-netizen/hackscan@v0.4.1
         with:
           path: src
           fail-on: high
@@ -255,7 +255,7 @@ Python 3.12 on the runner. Without the action:
 ```yaml
 repos:
   - repo: https://github.com/kahledawad2019-netizen/hackscan
-    rev: v0.4.0
+    rev: v0.4.1
     hooks:
       - id: hackscan
 ```
@@ -358,15 +358,26 @@ scan.
   star imports); `global`/`nonlocal` names are never trusted.
 - Mutable objects (lists, dicts, sets) are tracked by variable name. Mutation through
   direct aliases, method calls (`d.get(k).append(x)`), bound methods
-  (`add = parts.append`), conditional receivers and comprehension items is modeled;
-  aliases created in less direct ways (stored in another object's attribute or in a
-  container and mutated through it later, returned from a helper, reached through
-  `getattr`) may be missed, so a constant suppression involving such code deserves review.
+  (`add = parts.append`), conditional receivers and comprehension items is modeled. A
+  constant or sanitized list stored in a local container by a container method or item
+  store (`rows.append(parts)`, `rows += [parts]`, `d[k] = parts`) is linked to it, so a
+  later change through either name is seen through the other. An element of a list, set,
+  dict or tuple display written as a literal, an f-string, or a tuple or operator of such
+  is not a mutable object, so passing it on does not change the container (a name, a call
+  or an attribute may be any object, a list included).
+  Aliases created in less direct ways (stored in another object's attribute and mutated
+  through it later, returned from a helper, reached through `getattr`) may be missed, so a
+  constant suppression involving such code deserves review.
 - A sanitizer counts only through a name that cannot be something else in the same file:
   one import or definition, no assignment to an attribute of that name, no `setattr` /
   `delattr`. Replacing a sanitizer at runtime in other ways (from another file, or in the
   same file through an alias of `setattr`, `__setattr__`, `__dict__` writes and the like)
-  is not modeled.
+  is not modeled. The same holds for the pure library functions whose text result is a
+  constant when every argument is one: `os.path.join`, `os.path.normpath`, `os.fspath`,
+  `urllib.parse.unquote`, `html.unescape`, `re.sub` and the base64/binascii decoders (not
+  `os.path.abspath` or `os.path.expanduser`, which read the working directory and the
+  environment, and not `pathlib` paths, whose methods read the file system; a path built
+  from untrusted text still carries it).
 - Sanitizer credit computed in one function is reused by its callers and callees, so a
   transformation in another function that undoes it (slicing a shell-quoted argument,
   for example) can leave such a finding a candidate instead of confirming it.

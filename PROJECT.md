@@ -511,3 +511,23 @@ hackscan/
   Compatibility: the Finding schema (version 1) is unchanged; JSON and SARIF gain fields
   (consumers should tolerate extra keys) and messages/text output changed wording (do not parse
   display text; use `status` and `confirmation_basis`).
+- 2026-10-16 (v0.4.1): constant values through literal containers and pure library functions, and
+  container aliasing made sound. Precision: an element of a list/set/dict/tuple display written as
+  literals, f-strings or tuples/operators of such is not a mutable object (passing it on cannot change
+  the display: `for u, p in USERS: c.execute("... '%s'" % (u, p))` over a literal list, and command
+  tables iterated by `.items()`/`.values()`, are now suppressed); the pure text models (`os.path.join`,
+  `normpath`, `os.fspath`, `urllib.parse.unquote*`, `html.unescape`, `re.sub/subn`, base64/binascii
+  decoders) of constants give a constant, through a name the file does not replace (as for sanitizers;
+  not `abspath`/`expanduser`, and not `pathlib` paths, whose methods read the file system; pathlib
+  constructors are now preserving models, so a path built from untrusted text still carries it).
+  Soundness fixes found on the way (all suppressed on 0.4.0): a constant or sanitized list stored in a
+  container (`append`/`insert`/`extend`/`setdefault`, `d[k] = v`, `+=`) is linked to it, so a later change
+  through either name is seen through the other; `obj.x += [parts]` lets `parts` escape as `=` does; results
+  of unmodelled methods (`"a b".split()`) and of `sorted()` may be mutable lists; starred targets are new
+  lists; a non-source attribute read may be any object (`sql.Literal([...]).wrapped`). Evidence:
+  tests/test_constant_values.py (78), a second differential fuzz test (list variables, element mutation
+  through loop variables, path functions), 29/29 mutations killed (bytecode cleared around each run: a
+  same-size mutation restored within a second once reused a stale .pyc). Codex review: 4 rounds, "Step OK".
+  Benchmark: labelled suite unchanged (tables keep the 0.4.0 measurement); apps: vulpy 7 -> 6 reports,
+  FP 3 -> 2. Security agent development set: pooled precision@10 25/50 -> 25/49, recall@10 25/25.
+  Timing unchanged (datasette ~52 s, pgadmin4 ~63 s).
