@@ -10,7 +10,8 @@ environment (joined over every visit).
 Outcome per candidate (only for classes the engine models, see `TAINT_CLASSES`):
 - provably constant              -> suppressed `taint:constant_input`
 - sanitized for the finding class -> suppressed `taint:sanitized`
-- reaches an untrusted source     -> confirmed, with a source trace
+- reaches an untrusted source     -> confirmed, with a source trace, when the flow is
+                                     established (see `Source.assumed`)
 - otherwise (parameters, unknown calls, closures, imports) -> stays a candidate
 
 Soundness stance: suppression only when *every* path yields constant/sanitized values.
@@ -28,6 +29,14 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 
 from hackscan.analyzers.interproc import (
+    ASSUMED,
+    DROP,
+    MODEL,
+    models_of,
+    digits,
+    join_marks,
+    quoted,
+    sanitized_for,
     CallSite,
     FileFacts,
     Flow,
@@ -35,12 +44,13 @@ from hackscan.analyzers.interproc import (
     SymbolPair,
     finding_key,
     linkable_functions,
+    _import_base,
     module_name,
     module_symbols,
     outer_parts,
     parameters,
 )
-from hackscan.core.models import Evidence, Finding, Status
+from hackscan.core.models import ASSUMED_VERDICT, CONFIRMED_VERDICT, Evidence, Finding, Status
 from hackscan.core.taxonomy import CMDI, TAINT_CLASSES
 from hackscan.plugins.base import FileContext, Match
 from hackscan.plugins.scopes import COMPREHENSION_TYPES, FUNCTION_TYPES
@@ -125,6 +135,8 @@ STRING_METHODS = frozenset(
         "swapcase",
     }
 )
+# The arguments of a string method that become part of its result (others: none).
+STRING_DATA_ARGS = {"replace": (1,), "center": (1,), "ljust": (1,), "rjust": (1,)}
 # String-building methods whose receiver is a template (quote context applies).
 TEMPLATE_METHODS = frozenset({"join", "format", "format_map"})
 # String methods that only change letter case or remove characters: a sanitized value's
@@ -149,8 +161,135 @@ CREDIT_KEEPING_METHODS = frozenset(
 NUMERIC_PASSTHROUGH = frozenset({"abs", "round", "builtins.abs", "builtins.round"})
 # Pure builtins returning a container of the argument's elements.
 CONTAINER_BUILTINS = frozenset({"tuple", "sorted", "frozenset"})
+# The arguments of a builtin conversion that are its result's data (others: options).
+BUILTIN_DATA_ARGS = {
+    n: (0,) for n in ("str", "bytes", "bytearray", "repr", "ascii", "tuple", "sorted", "frozenset")
+}
+
+
+# Keyword spellings of those data arguments (`str(object=x)`, `bytes(source=x)`).
+BUILTIN_DATA_KEYWORDS = {"str": {"object"}, "bytes": {"source"}, "bytearray": {"source"}}
+
+
+def _builtin_data_keywords(names: frozenset[str]) -> set[str]:
+    """Data keywords common to every builtin `names` may be."""
+    names = frozenset(n[len("builtins.") :] if n.startswith("builtins.") else n for n in names)
+    found = [BUILTIN_DATA_KEYWORDS.get(n, set()) for n in names if n in BUILTIN_DATA_ARGS]
+    return set.intersection(*found) if found and len(found) == len(names) else set()
+
+
+def _builtin_roles(names: frozenset[str]) -> frozenset[int] | None:
+    """Data positions common to every builtin `names` may be (None: all are data)."""
+    names = frozenset(n[len("builtins.") :] if n.startswith("builtins.") else n for n in names)
+    roles = [BUILTIN_DATA_ARGS[n] for n in names if n in BUILTIN_DATA_ARGS]
+    if not roles or len(roles) != len(names):
+        return None
+    return frozenset.intersection(*(frozenset(r) for r in roles))
+
+
 # Builtins that make characters out of numbers: `format(65, "c")`, `bytes([65])`.
 CHAR_BUILTINS = frozenset({"format", "bytes", "bytearray"})
+# Element access and builtin conversions (`int.to_bytes`, `bytes.hex`): the result is (part
+# of, or an encoding of) the receiver's data, whatever its type.
+ACCESSOR_METHODS = frozenset(
+    {
+        "get",
+        "getlist",
+        "getall",
+        "getone",
+        "pop",
+        "popitem",
+        "copy",
+        "values",
+        "items",
+        "keys",
+        "to_dict",
+        "dict",
+        "lists",
+    }
+)
+# Container methods that store their arguments in the receiver (established).
+MUTATOR_METHODS = frozenset(
+    {
+        "append",
+        "extend",
+        "insert",
+        "add",
+        "update",
+        "setdefault",
+        "appendleft",
+        "extendleft",
+        "__setitem__",
+        "__iadd__",
+    }
+)
+# Library functions whose result carries their argument's data (decoding, parsing, path
+# assembly): the flow stays established. They grant no sanitizer credit.
+PRESERVING_FUNCTIONS: dict[str, tuple[tuple[int, ...] | None, tuple[str, ...]]] = {
+    # name -> (data argument positions (None: every positional argument), data keywords)
+    "json.loads": ((0,), ("s",)),
+    "ast.literal_eval": ((0,), ("node_or_string",)),
+    "compile": ((0,), ("source",)),
+    "builtins.compile": ((0,), ("source",)),
+    "base64.b64decode": ((0,), ("s",)),
+    "base64.urlsafe_b64decode": ((0,), ("s",)),
+    "base64.standard_b64decode": ((0,), ("s",)),
+    "base64.b32decode": ((0,), ("s",)),
+    "base64.b16decode": ((0,), ("s",)),
+    "binascii.unhexlify": ((0,), ("hexstr",)),
+    "binascii.a2b_base64": ((0,), ("data",)),
+    "urllib.parse.unquote": ((0,), ("string",)),
+    "urllib.parse.unquote_plus": ((0,), ("string",)),
+    "urllib.parse.unquote_to_bytes": ((0,), ("string",)),
+    "html.unescape": ((0,), ("s",)),
+    "re.sub": ((1, 2), ("repl", "string")),
+    "re.subn": ((1, 2), ("repl", "string")),
+    "os.path.join": (None, ()),
+    "os.path.abspath": ((0,), ("path",)),
+    "os.path.normpath": ((0,), ("path",)),
+    "os.path.expanduser": ((0,), ("path",)),
+    "os.fspath": ((0,), ("path",)),
+    "posixpath.join": (None, ()),
+    "ntpath.join": (None, ()),
+}
+
+
+# One name per library model (the same function under another module name).
+CANONICAL_MODELS = {"posixpath.join": "os.path.join", "ntpath.join": "os.path.join"}
+
+
+def canonical_model(name: str) -> str:
+    name = CANONICAL_MODELS.get(name, name)
+    return name[len("builtins.") :] if name.startswith("builtins.") else name
+
+
+# Builtins dispatched by name, also when qualified (`builtins.str`).
+BUILTIN_CALLS = MUTABLE_BUILTINS | PURE_BUILTINS | frozenset({"abs", "round"})
+# Calls modelled by their resolved name (their flow depends on that name, see `_call`).
+_BARE_MODELLED = (
+    PURE_BUILTINS | STR_BUILTINS | MUTABLE_BUILTINS | CHAR_BUILTINS | CONTAINER_BUILTINS
+)
+MODELLED_NAMES = (
+    frozenset(SANITIZERS)
+    | frozenset(PRESERVING_FUNCTIONS)
+    | NUMERIC_PASSTHROUGH
+    | _BARE_MODELLED
+    | frozenset("builtins." + n for n in _BARE_MODELLED)
+)
+# Modelled functions that make other characters out of digits (binary decoders).
+DIGIT_BREAKING = frozenset(
+    n for n in PRESERVING_FUNCTIONS if n.startswith(("base64.", "binascii."))
+)
+# Builtin conversions of numbers and bytes: the result encodes the receiver's data.
+CONVERSION_METHODS = frozenset({"to_bytes", "hex", "tobytes"})
+# Accessors that return their second argument when the key is missing.
+DEFAULT_ACCESSORS = frozenset({"get", "pop", "setdefault"})
+
+
+# Methods that read an input stream's own data.
+READ_METHODS = frozenset({"read", "readline", "readlines", "read1", "readall", "getvalue"})
+# The arguments a mutator stores (others: all): `insert(index, x)`, `setdefault(key, x)`.
+MUTATOR_DATA = {"insert": (1,), "__setitem__": (1,)}
 # Methods on a mutable receiver known not to modify it.
 READONLY_METHODS = frozenset(
     {"count", "index", "copy", "get", "keys", "values", "items", "__len__", "__contains__"}
@@ -171,6 +310,12 @@ PRINTF_SPEC = re.compile(r"%(?:\([^)]*\))?[#0\- +]*(?:\*|\d+)?(?:\.(?:\*|\d+))?[
 class Source:
     line: int
     description: str
+    # Reaches the value only through a call nobody models (`via`): possible, not established.
+    assumed: bool = False
+    via: str = ""
+    # The classes this source was sanitized for on its way (the value's `safe_for` is what
+    # the whole value is sanitized for; a confirmation needs one unsanitized source).
+    safe: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -247,10 +392,39 @@ def combine(values: Iterable[Taint]) -> Taint:
 
 
 def _unsafe_symbols(value: Taint, classes: frozenset[str]) -> Taint:
-    """Drop `classes` from what the symbolic parts count as sanitized for."""
-    if not value.symbols:
+    """Drop `classes` (credit marks) from what the symbolic parts and the sources count as
+    sanitized for. A symbolic part also records the drop: credit its caller gave it before
+    is invalidated too (see `interproc.then`)."""
+    if not value.symbols and not any(s.safe & classes for s in value.sources):
         return value
-    return replace(value, symbols=frozenset((a, s - classes) for a, s in value.symbols))
+    drops = frozenset(DROP + c for c in classes)
+    return replace(
+        value,
+        symbols=frozenset((a, (s - classes) | drops) for a, s in value.symbols),
+        sources=frozenset(replace(s, safe=s.safe - classes) for s in value.sources),
+    )
+
+
+# Credit that a number's text gives (see `interproc.DIGITS`).
+DIGIT_MARKS = frozenset(digits(c) for c in TAINT_CLASSES)
+# Every credit mark: plain credit per class, shell-quoting credit, a number's text.
+CREDIT_MARKS = TAINT_CLASSES | {quoted(CMDI)} | DIGIT_MARKS
+
+
+def assume(value: Taint, via: str) -> Taint:
+    """`value` after a call nobody models: its untrusted parts may still flow on, but only as
+    assumed (they never confirm), sources and symbolic parts alike."""
+    if not value.sources and not value.symbols:
+        return value
+    return replace(
+        value,
+        sources=frozenset(
+            s if s.assumed else replace(s, assumed=True, via=via) for s in value.sources
+        ),
+        symbols=frozenset(
+            (a, join_marks(s, frozenset({f"{ASSUMED}:{via}"}))) for a, s in value.symbols
+        ),
+    )
 
 
 def _with_symbol(value: Taint, atom: tuple) -> Taint:
@@ -267,7 +441,7 @@ def concat(values: list[Taint]) -> Taint:
     result = combine(values)
     if not result.shell_plain and any(v.quote_sanitized for v in values):
         result = replace(result, safe_for=result.safe_for - {CMDI})
-        result = _unsafe_symbols(result, frozenset({CMDI}))
+        result = _unsafe_symbols(result, frozenset({quoted(CMDI)}))
     # (`+` of numbers is arithmetic: still a number)
     number = bool(values) and all(v.number for v in values)
     program_start = bool(values) and values[0].program_start  # the command's first word
@@ -323,10 +497,13 @@ def item_of(value: Taint) -> Taint:
 
 def unquote(value: Taint) -> Taint:
     """Any transformation of a shell-quoted value (strip, replace, slicing, repr...) may
-    break the quoting, so quoting-based safety does not survive it."""
+    break the quoting, so quoting-based safety does not survive it. Symbolic parts lose
+    it whether or not this value is quoted here: their quoting may come from a caller."""
     if not value.quote_sanitized:
-        return value
-    value = _unsafe_symbols(value, frozenset({CMDI}))
+        if not value.symbols:
+            return value
+        return _unsafe_symbols(value, frozenset({quoted(CMDI)}))
+    value = _unsafe_symbols(value, frozenset({quoted(CMDI)}))
     # Its text holds quotes that may now be unbalanced (`shlex.quote("")[0]` is `'`).
     return replace(
         value, safe_for=value.safe_for - {CMDI}, quote_sanitized=False, shell_plain=False
@@ -367,13 +544,14 @@ def plain_template(node: ast.expr, *, printf: bool) -> bool:
         return not any(f is not None and ("." in f or "[" in f) for _, f, _, _ in fields)
 
 
-def drop_credit(value: Taint) -> Taint:
+def drop_credit(value: Taint, keep: frozenset[str] = frozenset()) -> Taint:
     """A transformation that can make arbitrary characters out of a sanitized value
     (`%c`, `int.to_bytes(...)`, `bytes([...])`, most methods): no sanitizer credit survives
-    it. Transformations of constants stay constant."""
+    it, except the marks in `keep` per dependency. Transformations of constants stay
+    constant."""
     if value.is_constant and not value.symbols:
         return value
-    value = _unsafe_symbols(unquote(value), TAINT_CLASSES)
+    value = _unsafe_symbols(unquote(value), CREDIT_MARKS - keep)
     return replace(value, safe_for=frozenset())
 
 
@@ -476,11 +654,14 @@ def analyze_taint(
     findings = []
     for f, m in candidates:
         taint = results.get(id(m.node))
-        decided = _decide(f, taint)
+        if taint is not None:
+            taint = _for_sink(f, taint)  # (so the exported flow is the one that was decided)
+        decided = _decide(f, taint, defer=facts is not None)
+        deferred = any(e.message == DEFERRED_VERDICT for e in decided.evidence)
         if (
             facts is not None
             and taint is not None
-            and taint.symbols
+            and (taint.symbols or deferred)
             and decided.status is Status.CANDIDATE
         ):
             facts.sinks[finding_key(decided)] = _flow(ctx, taint)
@@ -490,13 +671,38 @@ def analyze_taint(
 
 def _flow(ctx: FileContext, value: Taint) -> Flow:
     return Flow(
-        frozenset((ctx.path, s.line, s.description) for s in value.sources),
+        frozenset(
+            ((ctx.path, s.line, s.description), s.safe) for s in value.sources if not s.assumed
+        ),
         value.safe_for,
         value.symbols,
+        frozenset(
+            (
+                (ctx.path, s.line, s.description),
+                join_marks(s.safe, frozenset({f"{ASSUMED}:{s.via}"})),
+            )
+            for s in value.sources
+            if s.assumed
+        ),
     )
 
 
-def _decide(finding: Finding, taint: Taint | None) -> Finding:
+DEFERRED_VERDICT = (
+    "Untrusted data reaches the sink only through library models; whether scanned code may "
+    "replace them is decided with the whole scan."
+)
+
+
+def _for_sink(finding: Finding, taint: Taint) -> Taint:
+    """`taint` as this sink sees it. For a command, a quoted value may be the program itself
+    (`os.system(quote(x))`), or the program is not known to leave its operands alone
+    (`sh -c`): quoting proves nothing there."""
+    if finding.vuln_class == CMDI and taint.quote_sanitized and not taint.program_start:
+        return unquote(taint)
+    return taint
+
+
+def _decide(finding: Finding, taint: Taint | None, *, defer: bool = False) -> Finding:
     if taint is None or finding.vuln_class not in TAINT_CLASSES:
         return finding
     if taint.is_constant:
@@ -510,10 +716,7 @@ def _decide(finding: Finding, taint: Taint | None) -> Finding:
                 Evidence(PRODUCER, "taint_verdict", "Every path supplies a constant value."),
             ),
         )
-    if finding.vuln_class == CMDI and taint.quote_sanitized and not taint.program_start:
-        # The quoted value may be the program itself (`os.system(quote(x))`), or the program
-        # is not known to leave its operands alone (`sh -c`): quoting proves nothing.
-        taint = unquote(taint)
+    taint = _for_sink(finding, taint)
     if finding.vuln_class == CMDI and CMDI in taint.safe_for and taint.quote_sanitized:
         # shlex.quote protects POSIX shells only; under Windows cmd.exe `&`, `|` still
         # chain commands. The target platform is unknown, so keep it visible.
@@ -539,10 +742,26 @@ def _decide(finding: Finding, taint: Taint | None) -> Finding:
                 Evidence(PRODUCER, "taint_verdict", "Every path is sanitized for this sink."),
             ),
         )
-    if taint.sources:
+    unsanitized = [s for s in taint.sources if not sanitized_for(s.safe, finding.vuln_class)]
+    established = sorted(s for s in unsanitized if not s.assumed)
+    if established and defer and all(models_of(s.safe) for s in established):
+        # Every established path goes through a library model that another scanned file
+        # might replace (`json.loads = ...`): `interproc.confirm_findings` decides.
+        return replace(
+            finding,
+            evidence=(*finding.evidence, Evidence(PRODUCER, "taint_verdict", DEFERRED_VERDICT)),
+        )
+    if established:
+        # With whole-scan linking, a path through a library model is decided there (it may be
+        # replaced): the confirmation and its steps stand on the paths without one.
+        shown = [s for s in established if not (defer and models_of(s.safe))]
         steps = tuple(
-            Evidence(PRODUCER, "taint_step", f"Untrusted {s.description} at line {s.line}.")
-            for s in sorted(taint.sources)
+            Evidence(
+                PRODUCER,
+                "taint_step",
+                f"Modelled flow: untrusted {s.description} at line {s.line}.",
+            )
+            for s in shown
         )
         return replace(
             finding,
@@ -551,9 +770,28 @@ def _decide(finding: Finding, taint: Taint | None) -> Finding:
             evidence=(
                 *finding.evidence,
                 *steps,
-                Evidence(PRODUCER, "taint_verdict", "Untrusted input reaches the sink."),
+                Evidence(PRODUCER, "taint_verdict", CONFIRMED_VERDICT),
             ),
         )
+    assumed = sorted({(s.line, s.description, s.via) for s in unsanitized if s.assumed})
+    if assumed:
+        finding = replace(
+            finding,
+            evidence=(
+                *finding.evidence,
+                *(
+                    Evidence(
+                        PRODUCER,
+                        "taint_step",
+                        f"Untrusted {description} at line {line} may reach the sink, but only "
+                        f"through {via}, which is not modelled.",
+                    )
+                    for line, description, via in assumed
+                ),
+                Evidence(PRODUCER, "taint_verdict", ASSUMED_VERDICT),
+            ),
+        )
+        return finding
     return replace(
         finding,
         evidence=(
@@ -586,13 +824,23 @@ class _FileEngine:
         # `globals()`, `exec`, `__dict__`...: module names may change behind our back.
         self.namespace = _Namespace(ctx.tree)
         self.namespace_exposed = self.namespace.module
+        # For certainty (which flows are established): what this file may replace by name
+        # (`_replaced_names`; code the program evaluates, `eval`/`exec`, is outside the model).
+        # Its own namespace written (`globals()[...] = ...`): any of its names may change.
+        self.replaced = _replaced_names(ctx.tree, module_symbols(ctx.tree, ctx.path), ctx.path)
+        entries = {entry for entry, _ in self.replaced}
+        self.replaced_names = {e for e in entries if not e.startswith("module:")}
+        self.replaced_modules = {e[len("module:") :] for e in entries if e.startswith("module:")}
+        self.namespace_written = bool(self.replaced_modules & {module_name(ctx.path), "*"})
         self.linked: dict[int, str] = {}  # id(def) -> name, for linkable functions
         self._call_targets: dict[int, str | None] = {}
         self._binding_counts: dict[int, dict[str, int]] = {}
         self._stored_attrs: frozenset[str] | None = None
-        self._sites: dict[tuple[int, int], tuple[str, int, list[Taint], dict[str, Taint]]] = {}
+        self._sites: dict[tuple[int, int], tuple[str, int, list[Taint], dict[str, Taint], str]] = {}
         if facts is not None:
             facts.symbols = module_symbols(ctx.tree, ctx.path)
+            facts.replaced = self.replaced
+            # (a module whose namespace may be written: `interproc` does not link into it)
             for func in linkable_functions(ctx.tree, facts.symbols):
                 self.linked[id(func)] = func.name  # type: ignore[attr-defined]
 
@@ -621,12 +869,13 @@ class _FileEngine:
                     _flow(self.ctx, returns) if returns is not None else None,
                 )
         if self.facts is not None:
-            for key, (target, line, positional, keywords) in sorted(self._sites.items()):
+            for key, (target, line, positional, keywords, root) in sorted(self._sites.items()):
                 self.facts.sites[key] = CallSite(
                     target,
                     line,
                     tuple(_flow(self.ctx, v) for v in positional),
                     tuple(sorted((k, _flow(self.ctx, v)) for k, v in keywords.items())),
+                    root,
                 )
         return self.results
 
@@ -644,6 +893,10 @@ class _FileEngine:
 
     def _resolve_target(self, call: ast.Call) -> str | None:
         assert self.facts is not None
+        if not self.stable_callee(call):
+            return None  # the name may refer to a replacement (`f = other`)
+        # (a file whose own namespace is written is a replaced module: `interproc` does not
+        # link its calls, see `_solve`)
         parts: list[str] = []
         func = call.func
         while isinstance(func, ast.Attribute):
@@ -671,6 +924,26 @@ class _FileEngine:
             return False
         if not attrs:
             return True
+        self.stable_callee_attrs()
+        assert self._stored_attrs is not None
+        return "*" not in self._stored_attrs and not (self._stored_attrs & set(attrs))
+
+    def replaces_model(self, names: frozenset[str]) -> bool:
+        """Whether this file may replace any of the library functions `names`: its own
+        namespace (`namespace_written`), the function or a submodule on the way by name
+        (`json.loads = ...`), or the owning module (`json.__dict__`, `vars(json)`)."""
+        if self.namespace_written:
+            return True
+        for name in names:
+            parts = canonical_model(name).split(".")
+            owner = ".".join(parts[:-1]) or "builtins"
+            if any(part in self.replaced_names for part in parts[1:] or parts):
+                return True
+            if any(owner == m or owner.startswith(m + ".") for m in self.replaced_modules):
+                return True
+        return False
+
+    def stable_callee_attrs(self) -> None:
         if self._stored_attrs is None:
             stored: set[str] = set()
             for x in ast.walk(self.ctx.tree):
@@ -679,7 +952,6 @@ class _FileEngine:
                 elif isinstance(x, ast.Name) and x.id in {"setattr", "delattr"}:
                     stored.add("*")  # any attribute, by a computed name
             self._stored_attrs = frozenset(stored)
-        return "*" not in self._stored_attrs and not (self._stored_attrs & set(attrs))
 
     def stable_name(self, name: str, node: ast.AST) -> bool:
         """Whether `name` at `node` has exactly one binding (one import, one def) or none
@@ -743,7 +1015,11 @@ class _FileEngine:
             keywords = {
                 k: combine((v, prev[3][k])) if k in prev[3] else v for k, v in keywords.items()
             } | {k: v for k, v in prev[3].items() if k not in keywords}
-        self._sites[key] = (target, call.lineno, positional, keywords)
+        root = call.func
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        name = root.id if isinstance(root, ast.Name) else ""
+        self._sites[key] = (target, call.lineno, positional, keywords, name)
 
     def _functions(self) -> Iterator[ast.AST]:
         for node in ast.walk(self.ctx.tree):
@@ -790,7 +1066,11 @@ class _FileEngine:
         for name in names:
             # Only built-in request-object names stop a route parameter from being a source: a
             # project note may add request objects but never removes an untrusted input.
-            if route and name not in {"self", "cls"} and name not in knowledge.BUILTIN.request_param_names:
+            if (
+                route
+                and name not in {"self", "cls"}
+                and name not in knowledge.BUILTIN.request_param_names
+            ):
                 env[name] = source(f"route parameter `{name}` of handler `{fname}`", func)
                 if note_route:
                     env[name] = replace(env[name], mutable=True)
@@ -1018,6 +1298,12 @@ class _FunctionEngine:
         elif isinstance(target, (ast.Attribute, ast.Subscript)):
             base = _root_name(target)
             if base is not None:  # obj.x = v / d[k] = v: weak update of the container
+                if isinstance(target, ast.Attribute) or not self.eval(target.value, env).container:
+                    # Objects are tracked as a whole (not field by field): that a later read
+                    # or method of `obj` returns this value is assumed, not established. A
+                    # container's own item store (`d[k] = v`) is modelled.
+                    line = getattr(target, "lineno", 0)
+                    value = assume(value, f"a store into `{base}` ({self.ctx.path}:{line})")
                 self._weak_update(base, value, env)
             if value_expr is not None:  # storing a mutable elsewhere lets it escape
                 for name in self._mutable_names_in(value_expr, env):
@@ -1176,7 +1462,26 @@ class _FunctionEngine:
             if base is not None and self._lookup(base, func.value, env).mutable:
                 receivers.add(base)
             if receivers:
-                value = combine(self.eval(a, env) for a in args)
+                via = f"the method `{func.attr}` ({self.ctx.path}:{call.lineno})"
+                stored = MUTATOR_DATA.get(func.attr)
+                if stored is not None and (
+                    call.keywords or any(isinstance(a, ast.Starred) for a in call.args)
+                ):
+                    stored = ()
+                value = combine(
+                    self.eval(a, env)
+                    if stored is None or i in stored
+                    else assume(self.eval(a, env), via)
+                    for i, a in enumerate(args)
+                )
+                if (
+                    func.attr not in MUTATOR_METHODS
+                    or not self.eval(func.value, env).container  # `boxes[0].update(x)`
+                    or not all(env[n].container for n in receivers if n in env)
+                ):
+                    # Only a container's own mutators (`parts.append(x)`) are modelled; any
+                    # other method may or may not store its arguments: assumed.
+                    value = assume(value, via)
                 for name in sorted(receivers):
                     self._weak_update(name, value, env)
         # Mutable arguments escaping into code we do not model may be changed by it.
@@ -1203,9 +1508,13 @@ class _FunctionEngine:
             self.groups[n] = merged
 
     def _weak_update(self, name: str, value: Taint, env: Env) -> None:
+        # Groups are may-aliases (flow-insensitive): that another name sees the change is
+        # assumed, not established.
+        alias = assume(value, f"a possible alias of `{name}` ({self.ctx.path})")
         for n in self._group(name):
-            if n in env:
-                env[n] = combine((env[n], value))
+            if n in env:  # the same object, changed in place: still a container (or not)
+                part = value if n == name else alias
+                env[n] = replace(combine((env[n], part)), container=env[n].container)
 
     def _mutable_names_in(self, expr: ast.AST, env: Env) -> list[str]:
         """Local names anywhere in `expr` that may hold a mutable object. Calls are included:
@@ -1224,11 +1533,24 @@ class _FunctionEngine:
 
     def eval(self, node: ast.AST | None, env: Env) -> Taint:
         value = self._eval(node, env)
-        if value.quote_sanitized and not self._keeps_quoting(node):
-            value = unquote(value)
+        if (value.quote_sanitized or value.symbols) and not self._keeps_quoting(node):
+            value = self._outside_own_result(node, value, unquote)
         if value.sql_object and not self._keeps_object(node):
-            value = drop_credit(value)  # rendered as Python text, or taken apart
+            # rendered as Python text, or taken apart
+            value = self._outside_own_result(node, value, drop_credit)
         return value
+
+    def _outside_own_result(self, node: ast.AST | None, value: Taint, transform) -> Taint:
+        """`transform` for what `node` does to its operands, except to a linked call's own
+        result: what the callee does to its arguments is in its summary (`interproc`)."""
+        if not isinstance(node, ast.Call):
+            return transform(value)
+        atom = ("ret", self.ctx.path, node.lineno, node.col_offset)
+        own = frozenset(pair for pair in value.symbols if pair[0] == atom)
+        if not own:
+            return transform(value)
+        rest = transform(replace(value, symbols=value.symbols - own))
+        return replace(rest, symbols=rest.symbols | own)
 
     def _keeps_object(self, node: ast.AST | None) -> bool:
         """A SQL object keeps its credit only while it is passed on as is."""
@@ -1368,6 +1690,8 @@ class _FunctionEngine:
                 left = self.eval(node.left, env)
                 return concat([left, *(self.eval(e, env) for e in node.right.elts)])
             left, right = self.eval(node.left, env), self.eval(node.right, env)
+            if isinstance(node.op, ast.Mod) and (used := _printf_keys(node.left)) is not None:
+                right = self._printf_used(node, used, right, env)
             if isinstance(node.op, ast.Mod) and not left.mutable and not left.number:
                 # printf formatting: a list/dict operand or a `%r`-like spec changes the text.
                 if right.mutable or not plain_template(node.left, printf=True):
@@ -1420,7 +1744,9 @@ class _FunctionEngine:
             return value
         for qualified in self.ctx.scopes.resolve_name(name, node):
             if qualified in knowledge.active().source_names:
-                return known_source(knowledge.active().source_names[qualified], node, ("source_name", qualified))
+                return known_source(
+                    knowledge.active().source_names[qualified], node, ("source_name", qualified)
+                )
         if (
             not self.is_module
             and name in self.file.module_constants
@@ -1465,10 +1791,26 @@ class _FunctionEngine:
         if node.attr in knowledge.active().request_param_attrs and self._is_request_object(base):
             value = source(f"request data (`{self.ctx.segment(node)}`)", node)
             holder = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
-            if from_note(("request_param_attr", node.attr)) or from_note(("request_param_name", holder)):
+            if from_note(("request_param_attr", node.attr)) or from_note(
+                ("request_param_name", holder)
+            ):
                 value = replace(value, mutable=True)
             return value
         return self.eval(base, env)
+
+    def _request_data_expr(self, expr: ast.AST) -> bool:
+        """Whether `expr`, a method, is the request's own data method (`request.get_json`,
+        a named source): an attribute of the request itself, not a method of its data
+        (`request.args.render`, an unknown method)."""
+        if not isinstance(expr, ast.Attribute):
+            return False
+        for qualified in self.ctx.resolve_all(expr):
+            direct = flask_request_source(qualified) and qualified.count(".") == 2
+            if direct or qualified in knowledge.active().source_names:
+                return True
+        return expr.attr in knowledge.active().request_param_attrs and self._is_request_object(
+            expr.value
+        )
 
     def _is_request_object(self, expr: ast.AST) -> bool:
         """`request` parameter, or `self.request` (Django/DRF class-based views)."""
@@ -1483,12 +1825,69 @@ class _FunctionEngine:
 
     def _call(self, node: ast.Call, env: Env) -> Taint:
         value = self._call_value(node, env)
+        # What a call modelled by its name does (a sanitizer, a builtin, a library model)
+        # holds only while scanned code does not replace that name: the flow depends on it.
+        modelled = self.ctx.call_names(node) & MODELLED_NAMES
+        if modelled:
+            # (also where it is called and the name reaching it: `json` of `json.loads(...)`)
+            root = node.func
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            site = f"@{self.ctx.path}@{root.id if isinstance(root, ast.Name) else ''}"
+            value = _depends(value, frozenset(MODEL + canonical_model(n) + site for n in modelled))
         if self.file.call_target(node) is None:
             return value
-        if self._sanitizer_names(node) & (knowledge.active().source_names.keys() | SANITIZERS.keys()):
+        if self._sanitizer_names(node) & (
+            knowledge.active().source_names.keys() | SANITIZERS.keys()
+        ):
             return value
         # A linkable callee may return untrusted data of its own (resolved by `interproc`).
         return _with_symbol(value, ("ret", self.ctx.path, node.lineno, node.col_offset))
+
+    def _format_arguments(
+        self, node: ast.Call, template: ast.AST, args: list[Taint]
+    ) -> list[Taint]:
+        """`args` of `template.format(...)` with every argument the template does not use
+        assumed (all of them when the template is not a literal or `*args`/`**kw` are used)."""
+        used = None
+        if isinstance(template, ast.Constant) and isinstance(template.value, str):
+            used = _format_fields(template.value)
+        if used is None:
+            return args  # not a literal template
+        via = f"the method `format` ({self.ctx.path}:{node.lineno}), unused"
+        keys = [k.arg for k in node.keywords]
+        if any(isinstance(x, ast.Starred) for x in node.args) or None in keys:
+            return [assume(a, via) for a in args]  # which argument is which is unknown
+        n_pos = len(node.args)
+        return [
+            a if (i in used if i < n_pos else keys[i - n_pos] in used) else assume(a, via)
+            for i, a in enumerate(args)
+        ]
+
+    def _printf_used(self, node: ast.BinOp, used: set[str], right: Taint, env: Env) -> Taint:
+        """The right operand of `template % mapping` with the values the template does not use
+        assumed (all of it when the template has no conversions: it is returned as is)."""
+        via = f"the `%` operator ({self.ctx.path}:{node.lineno}), unused"
+        if not used:
+            return assume(right, via)
+        return self._used_mapping(node.right, used, right, via, env)
+
+    def _used_mapping(self, mapping: ast.AST, used: set, value: Taint, via: str, env: Env) -> Taint:
+        """A dict literal argument with the entries a template does not use assumed: unused
+        keys, and earlier values of a repeated key (the last one is kept)."""
+        if not (
+            isinstance(mapping, ast.Dict)
+            and all(isinstance(k, ast.Constant) for k in mapping.keys)  # (no `**` entries)
+        ):
+            return value
+        last = {k.value: i for i, k in enumerate(mapping.keys)}  # type: ignore[union-attr]
+        parts = [
+            self.eval(v, env)
+            if k.value in used and last[k.value] == i  # type: ignore[union-attr]
+            else assume(self.eval(v, env), via)
+            for i, (k, v) in enumerate(zip(mapping.keys, mapping.values, strict=True))
+        ]
+        return replace(combine(parts), mutable=True, shell_plain=False, container=True)
 
     def _sanitizer_names(self, node: ast.Call) -> frozenset[str]:
         """Resolved names of a callee that cannot be a reassignment instead (see
@@ -1504,37 +1903,91 @@ class _FunctionEngine:
 
     def _call_value(self, node: ast.Call, env: Env) -> Taint:
         names = self.ctx.call_names(node)
+        # `builtins.str(x)` is `str(x)` (a builtin model, not a method of a module)
+        names = names | {n[len("builtins.") :] for n in names if n.startswith("builtins.")}
         args = [self.eval(a, env) for a in _call_args(node)]
         for qualified in names:
             if qualified in knowledge.active().source_names:
-                return known_source(knowledge.active().source_names[qualified], node, ("source_name", qualified))
+                return known_source(
+                    knowledge.active().source_names[qualified], node, ("source_name", qualified)
+                )
         safe: set[str] = set()
         quoting = obj = numeric = False
+        only_numeric = True
         for qualified in self._sanitizer_names(node):
             safe |= SANITIZERS.get(qualified, frozenset())
             quoting = quoting or qualified in QUOTING_SANITIZERS
             obj = obj or qualified in SQL_OBJECT_SANITIZERS
             numeric = numeric or qualified in NUMERIC_SANITIZERS
+            if qualified in SANITIZERS and qualified not in NUMERIC_SANITIZERS:
+                only_numeric = False
         if safe:
             value = combine(args) if args else CONST
+            # Per dependency: shell-quoting credit is its own mark (see `concat`, `unquote`).
+            credit = frozenset(
+                digits(c) if only_numeric else quoted(c) if quoting and c == CMDI else c
+                for c in safe
+            )
             return Taint(
-                value.sources,
+                frozenset(replace(s, safe=s.safe | credit) for s in value.sources),
                 value.unknown,
                 frozenset(value.safe_for | safe),
                 mutable=False,
                 shell_plain=True if quoting else value.shell_plain,
                 quote_sanitized=quoting or value.quote_sanitized,
-                symbols=frozenset((a, s | safe) for a, s in value.symbols),
+                symbols=frozenset((a, s | credit) for a, s in value.symbols),
                 sql_object=obj,
                 number=numeric and not quoting and not obj,
                 program_start=quoting and _joined_program(node),
             )
+        modelled = [PRESERVING_FUNCTIONS[n] for n in sorted(names) if n in PRESERVING_FUNCTIONS]
+        if (
+            modelled
+            and self.file.stable_callee(node)
+            and not self.file.replaces_model(names)
+            and not _replaces_result(node, names)
+        ):
+            # Modelled library calls (not replaced in this file, by name or through a
+            # namespace: `json.__dict__`, `globals()`): the result carries the data
+            # arguments' data (established); any other argument (an option, a callback) may
+            # still flow on, assumed. No sanitizer credit.
+            via = f"`{min(names)}` ({self.ctx.path}:{node.lineno}) beyond its data arguments"
+            # (the flow depends on the models: `MODEL` marks, added in `_call`)
+            value = combine((UNKNOWN, *_data_arguments(node, args, modelled, via)))
+            # A number's text stays digits through them (not through a binary decoder).
+            keep = frozenset() if names & DIGIT_BREAKING else DIGIT_MARKS
+            return drop_credit(value, keep)
         func = node.func
-        if isinstance(func, ast.Attribute):
+        if isinstance(func, ast.Attribute) and not names & BUILTIN_CALLS:
             # Methods derive their result from the receiver and arguments
             # (`request.args.get("q")`, `" ".join(parts)`, `template.format(x)`).
             receiver = self._attribute(func, env)
+            if receiver.mutable and func.attr in TEMPLATE_METHODS | STRING_METHODS:
+                # Not known to be text (`Box().replace(...)`, a parameter): any method. What
+                # it is called with is assumed; the receiver keeps its own certainty (an
+                # object never carries established data, see `_assign`).
+                via = f"the method `{func.attr}` ({self.ctx.path}:{node.lineno})"
+                value = drop_credit(combine((receiver, *[assume(a, via) for a in args])))
+                return replace(value, shell_plain=False, number=False, program_start=False)
             if func.attr in TEMPLATE_METHODS:
+                if func.attr == "format":
+                    # Only the fields a literal template names reach the result, whatever their
+                    # conversions: `'{0!r}'.format(a, b)` drops b.
+                    args = self._format_arguments(node, func.value, args)
+                elif (
+                    func.attr == "format_map"
+                    and isinstance(func.value, ast.Constant)
+                    and isinstance(func.value.value, str)
+                    and (used := _format_fields(func.value.value)) is not None
+                    and len(node.args) == 1
+                    and not node.keywords
+                ):
+                    # only the entries the template names reach the result
+                    via = f"the method `format_map` ({self.ctx.path}:{node.lineno}), unused"
+                    if not used:
+                        args = [assume(a, via) for a in args]
+                    else:
+                        args = [self._used_mapping(node.args[0], used, args[0], via, env)]
                 if func.attr != "join" and not plain_template(func.value, printf=False):
                     # `{!r}`, `{:>9}`, or an unknown template (maybe a quoted value itself)
                     receiver, args = unquote(receiver), [unquote(a) for a in args]
@@ -1544,12 +1997,20 @@ class _FunctionEngine:
                 if func.attr == "join":
                     return self._join(node, receiver, args, env)
                 # The template's text without its fields (a field breaks a word: `ec{}ho`).
-                pieces = string.Formatter().parse(func.value.value)  # type: ignore[attr-defined]
+                pieces = list(string.Formatter().parse(func.value.value))  # type: ignore[attr-defined]
                 text = literal("\0".join(lit for lit, *_ in pieces))
                 flags = {"shell_plain": text.shell_plain, "program_start": text.program_start}
                 return concat([replace(receiver, **flags), *args])
             if func.attr in STRING_METHODS:
-                value = replace(combine((receiver, *args)), mutable=False)
+                # Only some arguments become part of the result (`replace(old, new)`: `new`;
+                # `strip(chars)`: none): the others select or measure, so their flow is assumed.
+                via = f"the method `{func.attr}` ({self.ctx.path}:{node.lineno})"
+                stored = STRING_DATA_ARGS.get(func.attr, ())
+                parts = [
+                    a if _plain_position(node, i) and i in stored else assume(a, via)
+                    for i, a in enumerate(args)
+                ]
+                value = replace(combine((receiver, *parts)), mutable=False)
                 if func.attr == "encode":  # bytes render as b'...' (credit: see `eval`)
                     value = replace(value, shell_plain=False)
                     # a codec may rewrite characters (`encode("unicode_escape")`)
@@ -1557,13 +2018,63 @@ class _FunctionEngine:
                 # (decode: every bytes value is already not shell_plain, see `literal`)
                 value = replace(unquote(value), number=False, program_start=False)
                 return value if func.attr in CREDIT_KEEPING_METHODS else drop_credit(value)
-            # Any other method: any value (a list renders with quotes), any characters.
-            value = drop_credit(unquote(combine((receiver, *args))))
+            # Any other method: any value (a list renders with quotes), any characters. Only
+            # element access (`.get`, `.getlist`, ...) and the request's own data methods
+            # (`request.get_json()`) are modelled; through any other method the flow is assumed.
+            via = f"the method `{func.attr}` ({self.ctx.path}:{node.lineno})"
+            if self._request_data_expr(func) and not receiver.mutable:
+                # `request.get_json()`: the request object's own data method (built in: an
+                # attribute that only a project note names may be any object, see `known_source`)
+                value = combine((receiver, *[assume(a, via) for a in args]))
+            elif func.attr in ACCESSOR_METHODS | CONVERSION_METHODS | DEFAULT_ACCESSORS:
+                # Element access and builtin conversions return (an encoding of) the receiver's
+                # data, with the receiver's own certainty: an object never carries established
+                # data (stores into it are assumed, see `_assign`); a default
+                # (`.get(key, default)`) is returned as is.
+                modelled_receiver = receiver.container or (
+                    bool(receiver.sources) and not receiver.mutable
+                )  # a container, or untrusted data itself (not an arbitrary object's `get`)
+                defaults = {1} if func.attr in DEFAULT_ACCESSORS and modelled_receiver else set()
+                value = combine(
+                    (
+                        receiver,
+                        *[
+                            a if i in defaults and _plain_position(node, i) else assume(a, via)
+                            for i, a in enumerate(args)
+                        ],
+                    )
+                )
+            elif func.attr in READ_METHODS and receiver.sources and not receiver.mutable:
+                # `sys.stdin.read()`, `request.stream.read()`, `request.files[k].read()`: the
+                # input itself (not a file a tainted name opens: that receiver is an object)
+                value = combine((receiver, *[assume(a, via) for a in args]))
+            elif func.attr == "__iadd__" and receiver.container:
+                value = combine((receiver, *args))  # the container itself, extended
+            else:
+                value = combine((assume(receiver, via), *[assume(a, via) for a in args]))
+            value = drop_credit(unquote(value))
             return replace(value, shell_plain=False, number=False, program_start=False)
         if self._sanitizer_names(node) & NUMERIC_PASSTHROUGH:
             # The argument's own credit, if any (`abs(int(x))`), not a new one.
             value = combine(args) if args else CONST
             return replace(value, mutable=False, number=bool(args) and args[0].number)
+        if names & (MUTABLE_BUILTINS | PURE_BUILTINS) and not (
+            self.file.stable_callee(node) and not self.file.replaces_model(names)
+        ):
+            names = names - MUTABLE_BUILTINS - PURE_BUILTINS  # rebound here: any function
+        roles = _builtin_roles(names)
+        if roles is not None and names & (MUTABLE_BUILTINS | PURE_BUILTINS):
+            # `str(b, codec)`, `sorted(xs, key=f)`: only the data argument is the result's data.
+            via = f"`{min(names)}` ({self.ctx.path}:{node.lineno}) beyond its data argument"
+            keys = _builtin_data_keywords(names)
+            n_pos = len(node.args)
+            args = [
+                a
+                if (_plain_position(node, i) and i in roles)
+                or (i >= n_pos and node.keywords[i - n_pos].arg in keys)
+                else assume(a, via)
+                for i, a in enumerate(args)
+            ]
         if names & MUTABLE_BUILTINS:
             value = combine(args) if args else CONST
             if names & CHAR_BUILTINS:
@@ -1583,8 +2094,11 @@ class _FunctionEngine:
             # repr()/ascii() add quotes, format() pads, tuple()/sorted() add brackets.
             value = replace(unquote(value), shell_plain=False, number=False, program_start=False)
             return replace(value, container=bool(names & CONTAINER_BUILTINS))
-        # Unknown function: taint flows through, but the result is not provably constant.
-        return combine((UNKNOWN, *args))
+        # Unknown function: taint may flow through (assumed), and the result is not provably
+        # constant (modelled library calls are handled above).
+        callee = min(names) if names else ast.unparse(node.func)[:60]
+        via = f"`{callee}` ({self.ctx.path}:{node.lineno})"
+        return combine((UNKNOWN, *[assume(a, via) for a in args]))
 
 
 # -- helpers ------------------------------------------------------------------------------
@@ -1618,6 +2132,591 @@ def _joined_program(node: ast.Call) -> bool:
         isinstance(first, ast.Constant)
         and isinstance(first.value, str)
         and inert_program(first.value)
+    )
+
+
+# Options of a modelled function that can replace what it returns (a custom decoder, a hook).
+RESULT_OPTIONS = {
+    "json.loads": frozenset(
+        {"cls", "object_hook", "object_pairs_hook", "parse_float", "parse_int", "parse_constant"}
+    ),
+}
+
+
+def _replaces_result(node: ast.Call, names: frozenset[str]) -> bool:
+    """Whether the call may run code of the caller's choosing that produces its result: a
+    result option (`json.loads(s, cls=...)`), `**kw`, or a replacement for `re.sub` that is not
+    a literal string (a function computes the replacement)."""
+    keys = {k.arg for k in node.keywords}
+    if None in keys and names & (RESULT_OPTIONS.keys() | {"re.sub", "re.subn"}):
+        return True
+    if any(keys & RESULT_OPTIONS[n] or len(node.args) > 1 for n in names if n in RESULT_OPTIONS):
+        return True
+    if names & {"re.sub", "re.subn"}:
+        repl = (
+            node.args[1]
+            if len(node.args) > 1
+            else next((k.value for k in node.keywords if k.arg == "repl"), None)
+        )
+        return not (isinstance(repl, ast.Constant) and isinstance(repl.value, (str, bytes)))
+    return False
+
+
+def _data_arguments(
+    node: ast.Call, args: list[Taint], models: list[tuple], via: str
+) -> list[Taint]:
+    """`args` (positional, then keyword values) with every non-data argument assumed. A
+    position at or after a `*args` is uncertain, so it is not a data argument either."""
+    positions: set[int] | None = set()
+    keywords: set[str] = set()
+    for model_positions, model_keywords in models:
+        positions = (
+            None
+            if positions is None or model_positions is None
+            else positions | set(model_positions)
+        )
+        keywords |= set(model_keywords)
+    out = []
+    starred = False
+    for index, value in enumerate(args):
+        if index < len(node.args):
+            starred = starred or isinstance(node.args[index], ast.Starred)
+            # (after a `*args` the position is unknown: data only if every position is)
+            data = positions is None or (not starred and index in positions)
+        else:
+            data = node.keywords[index - len(node.args)].arg in keywords
+        out.append(value if data else assume(value, via))
+    return out
+
+
+def _depends(value: Taint, tokens: frozenset[str]) -> Taint:
+    """`value` with its flow depending on the library models `tokens` (`MODEL` marks)."""
+    if not tokens or (not value.sources and not value.symbols):
+        return value
+    return replace(
+        value,
+        sources=frozenset(replace(s, safe=s.safe | tokens) for s in value.sources),
+        symbols=frozenset((a, join_marks(s, tokens)) for a, s in value.symbols),
+    )
+
+
+# Functions that write an object's attribute by name, or read a namespace mapping.
+WRITE_HELPERS = frozenset({"setattr", "delattr"})
+NAMESPACE_GETTERS = frozenset({"globals", "vars", "locals"})
+IMPORT_HELPERS = frozenset({"importlib.import_module", "__import__"})
+# Attributes of a module that only read it.
+READ_DUNDERS = frozenset(
+    {
+        "__name__",
+        "__file__",
+        "__doc__",
+        "__version__",
+        "__path__",
+        "__spec__",
+        "__package__",
+        "__all__",
+    }
+)
+# Attributes that only describe an object (setting them does not change what it does).
+DOC_DUNDERS = frozenset(
+    {"__doc__", "__annotations__", "__name__", "__qualname__", "__module__", "__wrapped__"}
+)
+# Methods of `sys.modules` that hand out a module.
+MODULE_LOOKUPS = frozenset({"get", "__getitem__", "pop", "setdefault"})
+# Methods of a mapping that only look a name up or test for it (`.copy()`, `.items()`,
+# `.values()` hand out what it holds).
+MAPPING_READERS = frozenset({"get", "__getitem__", "keys", "__contains__"})
+# Attributes of a function or object that change what it does when called.
+BEHAVIOUR_DUNDERS = frozenset(
+    {"__code__", "__defaults__", "__kwdefaults__", "__dict__", "__class__", "__call__"}
+)
+
+
+def _replaced_names(
+    tree: ast.Module, symbols: dict[str, tuple[str, str]], rel_path: str
+) -> frozenset[tuple[str, int]]:
+    """What this file may replace in other modules (or its own), each with the line of its
+    first write. A name: an attribute assigned or deleted on any object but a method's own
+    instance (`helpers.ident = ...`), or set by name (`setattr(x, "ident", f)`). A module
+    (`module:<dotted>`, or `module:*` for any): one whose object escapes, i.e. is used other
+    than by reading or calling one of its attributes (`m = json`, `vars(json)`,
+    `json.__dict__`, `f(json)`, `sys.modules[...] = ...`), and this file's own module when its
+    namespace mapping (`globals()`, `vars()`) is used other than for reading."""
+    own_module = module_name(rel_path)
+    lines: dict[str, int] = {}
+
+    def add(entry: str, at: ast.AST) -> None:
+        lines.setdefault(entry, getattr(at, "lineno", 0))
+
+    parents: dict[int, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    bound: dict[str, set[str]] = {"__builtins__": {"builtins"}}  # names bound to imports
+    for name, (kind, target) in symbols.items():
+        if kind == "import":
+            bound.setdefault(name, set()).add(target)
+    for node in ast.walk(tree):  # at any depth (`def f(): from . import helpers`)
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                top = a.name.split(".")[0]
+                bound.setdefault(a.asname or top, set()).add(a.name if a.asname else top)
+        elif isinstance(node, ast.ImportFrom):
+            base = _import_base(node, rel_path, own_module)
+            for a in node.names:
+                if base and a.name != "*":
+                    bound.setdefault(a.asname or a.name, set()).add(f"{base}.{a.name}")
+
+    aliases: dict[str, set[str]] = {}  # `g = globals`: g -> {globals}
+
+    def callee(expr: ast.AST) -> set[str]:
+        """The builtin or library function names `expr` may denote (`builtins.` dropped)."""
+        if isinstance(expr, ast.Name):
+            names = (bound.get(expr.id) or {expr.id}) | aliases.get(expr.id, set())
+        elif isinstance(expr, ast.Attribute):
+            names = {f"{m}.{expr.attr}" for m in modules(expr.value)}
+        else:
+            return set()
+        return {n[len("builtins.") :] if n.startswith("builtins.") else n for n in names}
+
+    memo: dict[int, set[str]] = {}
+
+    def modules(expr: ast.AST) -> set[str]:
+        """The modules (or module attributes) `expr` may be."""
+        if id(expr) in memo:
+            return memo[id(expr)]
+        out: set[str] = set()
+        if isinstance(expr, ast.Name):
+            out = set(bound.get(expr.id, ()))
+        elif isinstance(expr, ast.Attribute) and not expr.attr.startswith("__"):
+            out = {"*" if m == "*" else f"{m}.{expr.attr}" for m in modules(expr.value)}
+        elif isinstance(expr, ast.Subscript) and "sys.modules" in modules(expr.value):
+            key = expr.slice
+            literal_key = isinstance(key, ast.Constant) and isinstance(key.value, str)
+            out = {key.value} if literal_key else {"*"}  # type: ignore[union-attr]
+        elif (key := _namespace_lookup(expr, callee)) is not None:
+            # `globals()['json']`, `vars().get('json')`: what this module binds to that name
+            out = set(bound.get(key, ())) if key else {"*"}
+        elif (
+            isinstance(expr, ast.Call)
+            and isinstance(expr.func, ast.Attribute)
+            and expr.func.attr in MODULE_LOOKUPS
+            and "sys.modules" in modules(expr.func.value)
+        ):
+            key = expr.args[0] if expr.args else None  # `sys.modules.get("json")`
+            literal_key = isinstance(key, ast.Constant) and isinstance(key.value, str)
+            out = {key.value} if literal_key else {"*"}  # type: ignore[union-attr]
+        elif isinstance(expr, ast.Call) and callee(expr.func) & IMPORT_HELPERS:
+            out = _imported_names(expr, callee(expr.func)) or {"*"}
+        memo[id(expr)] = out
+        return out
+
+    helpers = NAMESPACE_GETTERS | WRITE_HELPERS | IMPORT_HELPERS
+    assigned = [
+        (node.value, node.targets if isinstance(node, ast.Assign) else [node.target])
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and node.value is not None
+    ]
+    changed = True
+    while changed:  # names bound to a helper function, through other such names too
+        changed = False
+        for value, targets in assigned:
+            found = (
+                callee(value) & helpers if isinstance(value, (ast.Name, ast.Attribute)) else set()
+            )
+            for target in targets:
+                if found and isinstance(target, ast.Name):
+                    before = aliases.get(target.id, set())
+                    if not found <= before:
+                        aliases[target.id] = before | found
+                        changed = True
+    memo.clear()
+    instance = _instance_stores(tree)
+    # names this module binds itself (not imports): its own functions, classes and values
+    local = {n for stmt in tree.body for n in _bound_names(stmt)} | {
+        n for stmt in tree.body for t in getattr(stmt, "targets", []) for n in _target_names(t)
+    }
+    local -= set(bound)
+    for node in ast.walk(tree):
+        parent = parents.get(id(node))
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and id(node) not in instance  # `self.path = ...` sets the instance's own attribute
+        ):
+            add(node.attr, node)
+            for module in sorted(modules(node.value)):  # `app.json = ...`
+                add(f"attr:{module}.{node.attr}", node)
+            if node.attr in BEHAVIOUR_DUNDERS:  # `ident.__code__ = ...`: `ident` itself changes
+                for entry in _changed_callable(node.value, modules, local):
+                    add(entry, node)
+        if isinstance(node, ast.Call):
+            helpers = callee(node.func)
+            if helpers & WRITE_HELPERS and len(node.args) >= 2:
+                name = node.args[1]
+                if isinstance(name, ast.Constant) and isinstance(name.value, str):
+                    add(name.value, node)  # (a computed name: its object escapes, below)
+                    if name.value in BEHAVIOUR_DUNDERS:  # `setattr(f, "__code__", g)`
+                        for entry in _changed_callable(node.args[0], modules, local):
+                            add(entry, node)
+        # A helper used as a value other than by a name bound to it (`ops = [setattr]`,
+        # `f(globals)`): where it is called is unknown. A write or import helper may write any
+        # module; a namespace getter may write this module's names, or any module it imports.
+        if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load):
+            helpers = callee(node)
+            called = isinstance(parent, ast.Call) and parent.func is node
+            aliased = isinstance(parent, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and all(
+                isinstance(target, ast.Name)
+                for target in (
+                    parent.targets if isinstance(parent, ast.Assign) else [parent.target]
+                )
+            )  # `g = globals`: followed (`aliases`)
+            if not (called or aliased):
+                if helpers & (WRITE_HELPERS | IMPORT_HELPERS):
+                    add("module:*", node)
+                if helpers & NAMESPACE_GETTERS:
+                    add(f"module:{own_module}", node)
+                    for module in sorted(set().union(*bound.values()) - {"builtins"}):
+                        add(f"module:{module}", node)
+        # This module's namespace used other than for reading (`globals()[k] = v`, `|=`).
+        if (
+            isinstance(node, ast.Call)
+            and callee(node.func) & NAMESPACE_GETTERS
+            and not (node.args or node.keywords)
+            and not _only_read(node, parents)
+        ):
+            add(f"module:{own_module}", node)  # (also `globals().copy()`: what it holds)
+            for module in sorted(set().union(*bound.values()) - {"builtins"}):
+                add(f"module:{module}", node)
+        # A function's globals of unknown origin (`fn.__globals__`): any module's namespace.
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "__globals__"
+            and not modules(node.value)
+            and not _only_read(node, parents)
+        ):
+            add("module:*", node)
+        # A module object that escapes.
+        found = modules(node) if isinstance(node, ast.expr) else set()
+        if not found:
+            continue
+        if "sys.modules" in found:
+            looked_up = isinstance(parent, ast.Subscript) and parent.value is node
+            if _changes_mapping(node, parents):  # `sys.modules[name] = m`, `.update(...)`
+                key = parent.slice if looked_up else None  # type: ignore[union-attr]
+                literal = isinstance(key, ast.Constant) and isinstance(key.value, str)
+                add(f"module:{key.value}" if literal else "module:*", node)  # type: ignore[union-attr]
+            elif not (
+                looked_up  # a lookup is a module expression of its own (`modules`)
+                or isinstance(parent, ast.Compare)
+                or (
+                    isinstance(parent, ast.Attribute)
+                    and parent.value is node
+                    and parent.attr in MODULE_LOOKUPS | {"keys", "__contains__"}
+                )
+            ):
+                add("module:*", node)  # `mods = sys.modules`, `.copy()`: may reach any module
+            continue
+        if "*" in found:
+            # A module whose name is computed (`import_module(name)`, a plugin): written here
+            # (`.__dict__`, `vars(...)`, `setattr(..., name, ...)`), it may be any module.
+            # (Handing it to other code is not followed: see `module:` entries below.)
+            writes = (
+                isinstance(parent, ast.Attribute)
+                and parent.value is node
+                and parent.attr.startswith("__")
+                and parent.attr not in READ_DUNDERS
+            ) or (
+                isinstance(parent, ast.Call)
+                and node in parent.args
+                and bool(callee(parent.func) & (WRITE_HELPERS | {"vars"}))
+            )
+            if writes:
+                add("module:*", node)
+            found = found - {"*"}
+            if not found:
+                continue
+        if _module_use_reads(node, parent, modules):
+            continue
+        if isinstance(parent, ast.Attribute) and parent.attr == "__globals__":
+            if _only_read(parent, parents):
+                continue  # `fn.__globals__.keys()`, `fn.__globals__[k]`: read
+            # `json.loads.__globals__`: the namespace of the module that defines the function
+            # (found through re-exports by `interproc`)
+            for function in sorted(found):
+                add(f"globals:{function}", node)
+            continue
+        for module in sorted(found):
+            add(f"module:{module}", node)
+    return frozenset(lines.items())
+
+
+def _namespace_lookup(expr: ast.AST, callee) -> str | None:
+    """For a lookup in this module's namespace (`globals()[k]`, `vars().get(k)`): the literal
+    key, or "" when it is computed; None for anything else."""
+    if isinstance(expr, ast.Subscript) and isinstance(expr.ctx, ast.Load):
+        mapping, key = expr.value, expr.slice
+    elif (
+        isinstance(expr, ast.Call)
+        and isinstance(expr.func, ast.Attribute)
+        and expr.func.attr in MODULE_LOOKUPS
+    ):
+        mapping, key = expr.func.value, (expr.args[0] if expr.args else None)
+    else:
+        return None
+    if not (
+        isinstance(mapping, ast.Call)
+        and callee(mapping.func) & NAMESPACE_GETTERS
+        and not (mapping.args or mapping.keywords)
+    ):
+        return None
+    return key.value if isinstance(key, ast.Constant) and isinstance(key.value, str) else ""
+
+
+def _imported_names(call: ast.Call, helpers: set[str]) -> set[str]:
+    """The modules a literal `import_module(name, package)` / `__import__(name, ...)` call
+    returns (relative names resolved against a literal package; `__import__('a.b')` returns
+    `a` unless its `fromlist` is non-empty), or none when that is not known."""
+    name = _imported_name(call, helpers)
+    if name is None or "__import__" not in helpers or "." not in name:
+        return {name} if name else set()
+    fromlist = call.args[3] if len(call.args) > 3 else None
+    fromlist = next((k.value for k in call.keywords if k.arg == "fromlist"), fromlist)
+    top = name.split(".")[0]
+    if fromlist is None or (isinstance(fromlist, (ast.List, ast.Tuple)) and not fromlist.elts):
+        return {top}
+    if isinstance(fromlist, (ast.List, ast.Tuple)):
+        return {name}
+    return {top, name}  # a fromlist of unknown value
+
+
+def _imported_name(call: ast.Call, helpers: set[str]) -> str | None:
+    """The module name a literal import call asks for (relative names resolved against a
+    literal package), or None when it is not literal."""
+
+    def literal(node: ast.AST | None) -> str | None:
+        return (
+            node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+        )
+
+    name = literal(call.args[0] if call.args else None)
+    if name is None:
+        return None
+    if "__import__" in helpers:
+        level = call.args[4] if len(call.args) > 4 else None
+        level = next((k.value for k in call.keywords if k.arg == "level"), level)
+        if level is not None and not (isinstance(level, ast.Constant) and level.value == 0):
+            return None  # a relative `__import__`
+        return name
+    if not name.startswith("."):
+        return name
+    package = literal(call.args[1] if len(call.args) > 1 else None)
+    package = package or literal(next((k.value for k in call.keywords if k.arg == "package"), None))
+    if not package:
+        return None
+    dots = len(name) - len(name.lstrip("."))
+    base = package.split(".")
+    if dots - 1 > len(base) - 1:
+        return None
+    base = base[: len(base) - (dots - 1)]
+    rest = name[dots:]
+    return ".".join([*base, rest] if rest else base)
+
+
+def _changed_callable(target: ast.AST, modules, local: set[str]) -> list[str]:
+    """Replacement entries for an object whose behaviour is changed in place (`__code__`):
+    a module's function by its name (`helpers.ident`, `from helpers import ident`); an object
+    this module defines (`Schema.__new__`) by its names; anything else (a parameter) may be any
+    function (`module:*`)."""
+    found = modules(target)
+    if found and "*" not in found:
+        return sorted({m.rsplit(".", 1)[-1] for m in found} | {f"module:{m}" for m in found})
+    names = []
+    root = target
+    while isinstance(root, ast.Attribute):
+        names.append(root.attr)
+        root = root.value
+    if isinstance(root, ast.Name) and root.id in local:
+        return sorted({root.id, *names})
+    return ["module:*"]
+
+
+def _module_use_reads(node: ast.AST, parent: ast.AST | None, modules) -> bool:
+    """Whether a module expression only reads or calls one of its attributes here."""
+    if isinstance(parent, ast.Attribute) and parent.value is node:
+        return (
+            not parent.attr.startswith("__")
+            or parent.attr in DOC_DUNDERS  # `json.__doc__ = ...`: metadata only
+            or (parent.attr in READ_DUNDERS and isinstance(parent.ctx, ast.Load))
+        )
+    if isinstance(parent, ast.Call) and parent.func is node:
+        return True
+    if isinstance(parent, ast.Subscript) and parent.value is node:
+        return "sys.modules" in modules(node) and isinstance(parent.ctx, ast.Load)
+    return False
+
+
+def _only_read(node: ast.AST, parents: dict[int, ast.AST]) -> bool:
+    """Whether a namespace mapping (`globals()`) is only read where it is used."""
+    parent = parents.get(id(node))
+    if isinstance(parent, ast.Subscript) and parent.value is node:
+        return isinstance(parent.ctx, ast.Load)  # (`globals()[k] += v` stores)
+    if isinstance(parent, ast.Attribute) and parent.value is node:
+        return parent.attr in MAPPING_READERS
+    return isinstance(parent, ast.Compare)  # `name in globals()`
+
+
+def _changes_mapping(node: ast.AST, parents: dict[int, ast.AST]) -> bool:
+    """`node` (a mapping) stored into, deleted from or changed by a method here."""
+    parent = parents.get(id(node))
+    if isinstance(parent, ast.Subscript) and parent.value is node:
+        return isinstance(parent.ctx, (ast.Store, ast.Del))  # (also `m[k] += v`)
+    if isinstance(parent, ast.Attribute) and parent.value is node:
+        return parent.attr in MAPPING_WRITERS
+    return isinstance(parent, ast.AugAssign) and parent.target is node
+
+
+def _instance_stores(tree: ast.Module) -> set[int]:
+    """Attribute stores on a method's own instance or class (`self.x = ...`): the first
+    parameter of a function defined directly in a class body, not a static method, and never
+    bound again anywhere inside it (nested functions, defaults and `nonlocal` included)."""
+    out: set[int] = set()
+    for cls in ast.walk(tree):
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        for method in cls.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            params = [*method.args.posonlyargs, *method.args.args]
+            static = any(
+                (isinstance(d, ast.Name) and d.id == "staticmethod")
+                or (isinstance(d, ast.Attribute) and d.attr == "staticmethod")
+                for d in method.decorator_list
+            )
+            if not params or static:
+                continue
+            first = params[0].arg
+            inner = [n for n in ast.walk(method) if n is not method]
+            rebound = any(
+                first in _bound_names(n)
+                or (isinstance(n, ast.arg) and n is not params[0] and n.arg == first)
+                for n in inner
+            )
+            if rebound:
+                continue  # `self = json`, or a nested scope's own `self`
+            for node in inner:
+                if (
+                    isinstance(node, ast.Attribute)
+                    and isinstance(node.ctx, (ast.Store, ast.Del))
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == first
+                ):
+                    out.add(id(node))
+    return out
+
+
+def _target_names(target: ast.AST) -> set[str]:
+    """The names an assignment target binds (`a, (b, *c) = ...`)."""
+    return {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+
+
+def _bound_names(node: ast.AST) -> set[str]:
+    """Names `node` binds (or declares global/nonlocal): stores, imports, definitions,
+    `except ... as`, match captures."""
+    if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+        return {node.id}
+    if isinstance(node, (ast.Global, ast.Nonlocal)):
+        return set(node.names)
+    if isinstance(node, ast.alias):
+        return {node.asname or node.name.split(".")[0]}
+    if isinstance(node, (*FUNCTION_TYPES, ast.ClassDef)) and hasattr(node, "name"):
+        return {node.name}  # type: ignore[attr-defined]
+    if isinstance(node, ast.ExceptHandler) and node.name:
+        return {node.name}
+    name = getattr(node, "name", None) if type(node).__name__ in {"MatchAs", "MatchStar"} else None
+    rest = getattr(node, "rest", None) if type(node).__name__ == "MatchMapping" else None
+    return {n for n in (name, rest) if n}
+
+
+def _own_scope_nodes(func: ast.AST):
+    """The nodes of `func`'s body that run in its own scope (not nested functions/classes)."""
+    stack = list(getattr(func, "body", []))
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (*FUNCTION_TYPES, ast.ClassDef)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _printf_keys(template: ast.AST) -> set[str] | None:
+    """The mapping keys a literal printf template uses (`%(name)s`; a key may hold balanced
+    parentheses, as Python parses it), or None when it has a positional conversion (`%s`:
+    every operand is used), does not parse, or is not a literal."""
+    if not (isinstance(template, ast.Constant) and isinstance(template.value, (str, bytes))):
+        return None
+    raw = template.value
+    text = raw.decode("latin-1") if isinstance(raw, bytes) else raw  # bytes keys are bytes
+    keys: set = set()
+    i = 0
+    while i < len(text):
+        if text[i] != "%":
+            i += 1
+            continue
+        i += 1
+        if i < len(text) and text[i] == "%":
+            i += 1
+            continue
+        if i >= len(text) or text[i] != "(":
+            return None  # a positional conversion (or a truncated one)
+        depth, start = 1, i + 1
+        i += 1
+        while i < len(text) and depth:
+            depth += {"(": 1, ")": -1}.get(text[i], 0)
+            i += 1
+        if depth:
+            return None
+        key = text[start : i - 1]
+        keys.add(key.encode("latin-1") if isinstance(raw, bytes) else key)
+        while i < len(text) and text[i] in "#0- +*.0123456789hlL":
+            i += 1
+        i += 1  # the conversion character
+    return keys
+
+
+def _format_fields(template: str) -> set | None:
+    """Argument positions and names a `str.format` template uses (`{}`, `{1!r}`, `{x[0]}`,
+    fields nested in a spec), or None when it does not parse."""
+    used: set = set()
+    auto = [0]
+
+    def walk(text: str, depth: int) -> None:
+        for _, field, spec, _ in string.Formatter().parse(text):
+            if field is None:
+                continue
+            base = re.split(r"[.\[]", field, maxsplit=1)[0]
+            if base == "":
+                used.add(auto[0])
+                auto[0] += 1
+            elif base.isdecimal():  # (as Python: `{²}` names a key, not a position)
+                used.add(int(base))
+            else:
+                used.add(base)
+            if spec and depth < 2:
+                walk(spec, depth + 1)
+
+    try:
+        walk(template, 0)
+    except ValueError:
+        return None
+    return used
+
+
+def _plain_position(node: ast.Call, index: int) -> bool:
+    """Whether argument `index` (positional, then keyword values) is the positional argument
+    at that position: no `*args` up to it (its position is unknown), and not a keyword."""
+    return index < len(node.args) and not any(
+        isinstance(a, ast.Starred) for a in node.args[: index + 1]
     )
 
 
@@ -1717,6 +2816,12 @@ def _module_binding_counts(tree: ast.AST) -> dict[str, int]:
 
 # Ways code can write module globals by name at runtime.
 NAMESPACE_FUNCTIONS = frozenset({"globals", "vars", "locals", "exec", "eval", "__import__"})
+# Methods that change a mapping (a namespace's `__dict__`, `globals()`).
+MAPPING_WRITERS = frozenset(
+    {"update", "setdefault", "pop", "popitem", "clear", "__setitem__", "__delitem__"}
+)
+
+
 NAMESPACE_ATTRIBUTES = frozenset({"__dict__", "__globals__", "modules", "__builtins__"})
 
 
@@ -1726,13 +2831,14 @@ class _Namespace:
     `exec`, `builtins.exec`, `from builtins import exec as run`, `run = exec` (assigned
     aliases are followed file-wide). Computed once per file."""
 
-    def __init__(self, tree: ast.Module) -> None:
+    def __init__(self, tree: ast.Module, functions: frozenset[str] = NAMESPACE_FUNCTIONS) -> None:
+        self.functions = functions
         self.imported = any(  # writers imported under another name
             (
                 isinstance(node, ast.ImportFrom)
                 and any(
                     a.name == "*"  # a star import may also rebind our names
-                    or a.name in NAMESPACE_FUNCTIONS
+                    or a.name in functions
                     or a.name in NAMESPACE_ATTRIBUTES
                     or a.name == "__builtins__"
                     for a in node.names
@@ -1744,9 +2850,9 @@ class _Namespace:
             )
             for node in ast.walk(tree)
         )
-        self.writers = set(NAMESPACE_FUNCTIONS) | {"__builtins__"}
+        self.writers = set(functions) | {"__builtins__"}
         self.module = self.imported or any(
-            _mentions_writer(node, self.writers) for node in ast.walk(tree)
+            _mentions_writer(node, self.writers, functions) for node in ast.walk(tree)
         )
         if not self.module:
             return  # no writer anywhere: no aliases either
@@ -1761,7 +2867,9 @@ class _Namespace:
         while changed:
             changed = False
             for value, targets in assignments:
-                if not any(_mentions_writer(part, self.writers) for part in ast.walk(value)):
+                if not any(
+                    _mentions_writer(part, self.writers, functions) for part in ast.walk(value)
+                ):
                     continue
                 for target in targets:
                     for name in ast.walk(target):
@@ -1773,15 +2881,17 @@ class _Namespace:
         if not self.module:
             return False
         return self.imported or any(
-            _mentions_writer(node, self.writers) for node in _own_nodes(scope)
+            _mentions_writer(node, self.writers, self.functions) for node in _own_nodes(scope)
         )
 
 
-def _mentions_writer(node: ast.AST, writers: set[str]) -> bool:
+def _mentions_writer(
+    node: ast.AST, writers: set[str], functions: frozenset[str] = NAMESPACE_FUNCTIONS
+) -> bool:
     if isinstance(node, ast.Name):
         return node.id in writers
     if isinstance(node, ast.Attribute):
-        return node.attr in NAMESPACE_ATTRIBUTES or node.attr in NAMESPACE_FUNCTIONS
+        return node.attr in NAMESPACE_ATTRIBUTES or node.attr in functions
     return False
 
 

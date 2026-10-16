@@ -8,7 +8,7 @@ import pytest
 
 from hackscan.analyzers.interproc import module_name, module_symbols
 from hackscan.config import HackScanConfig
-from hackscan.core.models import Status
+from hackscan.core.models import CONFIRMED_VERDICT, Status
 from hackscan.core.pipeline import scan
 
 UTILS = """
@@ -118,7 +118,7 @@ def test_confirmation_explains_the_path(tmp_path):
     assert len(steps) == 1
     assert "at app/views.py:7 reaches parameter `cmd` of `run`." in steps[0], steps
     verdicts = [e.message for e in finding.evidence if e.kind == "taint_verdict"]
-    assert verdicts == ["Untrusted input reaches the sink through calls."]
+    assert verdicts == [CONFIRMED_VERDICT]
     assert finding.confidence > 50
 
 

@@ -5,8 +5,9 @@ Safety model (PROJECT.md "LLM Safety"):
 - Scanned code is untrusted *data*: it is fenced with a per-request random nonce, the
   system prompt says never to follow instructions inside it, and the reply must match a
   JSON schema or it is discarded.
-- The model can only move `candidate -> confirmed | suppressed`. It cannot create
-  findings, raise severity, or touch confirmed/suppressed findings.
+- The model can only annotate a candidate (an assessment, never a confirmation: only an
+  established modelled flow confirms) or move it to `suppressed` with verified evidence. It
+  cannot create findings, raise severity, or touch confirmed/suppressed findings.
 - A suppression needs *verifiable* evidence: the model must cite a line that a
   deterministic check confirms is a sanitizer call, constant assignment or guard
   involving a variable that reaches the sink. Unverifiable rationale only adds a note.
@@ -294,11 +295,17 @@ def _apply(finding: Finding, answer: dict[str, Any], ctx, config, rescan) -> Fin
     reason = answer["reason"].strip() or "(no reason given)"
     verdict = answer["verdict"]
     if verdict == "true_positive":
+        # An assessment, not a confirmation: only an established modelled flow confirms
+        # (README "Meaning of confirmation"). The finding stays a candidate.
         new = replace(
             finding,
-            status=Status.CONFIRMED,
             confidence=min(100, finding.confidence + CONFIRM_BOOST),
-            evidence=(*finding.evidence, Evidence(PRODUCER, "llm_rationale", reason)),
+            evidence=(
+                *finding.evidence,
+                Evidence(
+                    PRODUCER, "llm_rationale", f"LLM assessment (not a confirmation): {reason}"
+                ),
+            ),
         )
         if new.fix is None and answer["fixed_call"] and rescan is not None:
             fix = _llm_fix(finding, answer["fixed_call"], ctx, rescan)

@@ -463,6 +463,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--tools", default=",".join(TOOLS))
     parser.add_argument("--out", type=Path, default=HERE / "RESULTS.md")
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help="keep the other tools' entries from the existing JSON (re-run only --tools)",
+    )
     args = parser.parse_args(argv)
     labels = load_labels()
     results: list[ToolResult] = []
@@ -471,6 +476,13 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"unknown tool {name!r}")
         results.extend(TOOLS[name](SUITE))
     data = to_json(labels, results)
+    previous = args.out.with_suffix(".json")
+    if args.merge and previous.exists():
+        kept = json.loads(previous.read_text(encoding="utf-8"))["tools"]
+        # Same order as before; tools that were re-run replace their old entries.
+        data["tools"] = {name: data["tools"].get(name, entry) for name, entry in kept.items()} | {
+            name: entry for name, entry in data["tools"].items() if name not in kept
+        }
     args.out.write_text(render(data), encoding="utf-8")
     args.out.with_suffix(".json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     print(render(data))

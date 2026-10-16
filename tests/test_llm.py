@@ -77,12 +77,14 @@ def run(cmd):
 """
 
 
-def test_true_positive_confirms_without_raising_severity(tmp_path):
+def test_true_positive_is_an_assessment_not_a_confirmation(tmp_path):
+    # only an established modelled flow confirms (the confirmation contract)
     report = run(tmp_path, PARAM_CMD, FakeOllama(answer("true_positive")))
     (f,) = report.findings
-    assert f.status is Status.CONFIRMED
+    assert f.status is Status.CANDIDATE
     assert f.severity.value == "high"
-    assert any(e.kind == "llm_rationale" for e in f.evidence)
+    (note,) = [e.message for e in f.evidence if e.kind == "llm_rationale"]
+    assert note.startswith("LLM assessment (not a confirmation): ")
 
 
 def test_only_candidates_are_sent(tmp_path):

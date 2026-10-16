@@ -300,7 +300,13 @@ def test_identifier_helper_alone_never_suppresses(imports: str, body: str):
         for f in analyze_source(code, "t.py", builtin_plugins()).findings
         if f.vuln_class == "sqli"
     ]
-    assert f.status is Status.CONFIRMED  # request data, no sanitizer on the way
+    # Request data, no sanitizer on the way: never suppressed. The helper is not in the scanned
+    # code, so the flow through it is assumed (a candidate), not established.
+    assert f.status is Status.CANDIDATE
+    assert any(
+        "`datasette.utils.escape_sqlite`" in e.message and "not modelled" in e.message
+        for e in f.evidence
+    )
 
 
 def test_identifier_helper_across_files_never_suppresses(tmp_path: Path):

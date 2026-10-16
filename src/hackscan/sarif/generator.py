@@ -21,7 +21,14 @@ from typing import Any
 from urllib.parse import quote
 
 from hackscan import __version__
-from hackscan.core.models import Finding, Severity, Status
+from hackscan.core.models import (
+    CONFIRMATION_CONTRACT,
+    Finding,
+    Severity,
+    Status,
+    confirmation_basis,
+    qualified_verdict,
+)
 from hackscan.core.pipeline import ScanResult
 from hackscan.plugins.base import RulePlugin
 
@@ -124,7 +131,9 @@ def _result(f: Finding, index: int, prefix: str) -> dict[str, Any]:
         "ruleId": f.rule_id,
         "ruleIndex": index,
         "level": LEVEL[f.severity],
-        "message": {"text": f.message},
+        "message": {
+            "text": f"{f.message} {verdict}" if (verdict := qualified_verdict(f)) else f.message
+        },
         "locations": [{"physicalLocation": _physical(f, uri)}],
         "partialFingerprints": {FINGERPRINT_KEY: f.id},
         "properties": {
@@ -132,6 +141,8 @@ def _result(f: Finding, index: int, prefix: str) -> dict[str, Any]:
             "security-severity": SECURITY_SEVERITY[f.severity],
             "confidence": f.confidence,
             "status": f.status.value,
+            "confirmationBasis": confirmation_basis(f),
+            "confirmationContract": CONFIRMATION_CONTRACT,
             "vulnClass": f.vuln_class,
             "cwe": list(f.cwe),
             "sources": list(f.sources),

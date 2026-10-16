@@ -15,6 +15,18 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 
+# What `confirmed` means (README "Meaning of confirmation"); every output names the contract.
+CONFIRMATION_CONTRACT = "hackscan-confirmation-v1"
+CONFIRMED_VERDICT = (
+    "Confirmed: A modelled flow from a recognized untrusted source to this sink is established "
+    "under HackScan's documented analysis assumptions. This does not establish runtime "
+    "reachability or exploitability."
+)
+ASSUMED_VERDICT = (
+    "Candidate: A possible flow involves an operation or binding that HackScan does not "
+    "establish. Review required."
+)
+
 OWN_SOURCE = "hackscan"
 
 
@@ -268,3 +280,22 @@ def _region_to_dict(region: Region) -> dict[str, Any]:
         "end_line": region.end_line,
         "end_column": region.end_column,
     }
+
+
+def confirmation_basis(finding: Finding) -> str | None:
+    """Why a finding has its status under the confirmation contract: "modelled-flow" for a
+    confirmed finding (only the taint analysis confirms), "assumed-flow" for a candidate whose
+    possible flow is assumed, None otherwise."""
+    if finding.status is Status.CONFIRMED:
+        return "modelled-flow"
+    if finding.status is Status.CANDIDATE and any(
+        e.kind == "taint_verdict" and e.message == ASSUMED_VERDICT for e in finding.evidence
+    ):
+        return "assumed-flow"
+    return None
+
+
+def qualified_verdict(finding: Finding) -> str | None:
+    """The contract's verdict sentence for a finding, when it has one."""
+    basis = confirmation_basis(finding)
+    return {"modelled-flow": CONFIRMED_VERDICT, "assumed-flow": ASSUMED_VERDICT}.get(basis or "")

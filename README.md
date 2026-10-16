@@ -1,30 +1,31 @@
 # HackScan
 
-**A Python security scanner that verifies what it reports.** HackScan finds injection
+**A Python security scanner that checks what it reports.** HackScan finds injection
 sinks with its own AST engine, then runs a flow-sensitive taint analysis to decide, per
-finding, whether untrusted input really reaches it. It can also ingest Semgrep, Bandit,
+finding, whether a modelled flow from untrusted input to the sink is established (see
+[Meaning of confirmation](#meaning-of-confirmation)). It can also ingest Semgrep, Bandit,
 CodeQL and Gitleaks results, merge duplicates across tools, and emit one SARIF report.
 
 ```text
 $ hackscan scan app/
-HIGH     confirmed  views.py:10:9  HS-SQLI-001  [100%]
+HIGH     confirmed  views.py:10:9  HS-SQLI-001  [score 100]
     SQL query is built with string formatting/concatenation.
     | cursor.execute("SELECT * FROM sales WHERE year = " + year)
-    > Untrusted request data (`request.GET`) at line 8.
-    > Untrusted input reaches the sink.
+    > Modelled flow: untrusted request data (`request.GET`) at line 8.
+    > Confirmed: A modelled flow from a recognized untrusted source to this sink is established under HackScan's documented analysis assumptions. This does not establish runtime reachability or exploitability.
 ```
 
 ## Why another scanner?
 
 | | HackScan |
 |---|---|
-| **Verdicts, not just matches** | Every injection candidate is **confirmed** (untrusted source reaches it, with a trace), **suppressed** (provably constant or sanitized on every path), or left as a **candidate** for review. |
+| **Verdicts, not just matches** | Every injection candidate is **confirmed** (a modelled flow from an untrusted source is established, with a trace: see [Meaning of confirmation](#meaning-of-confirmation)), **suppressed** (constant or sanitized on every modelled path), or left as a **candidate** for review. |
 | **Sound suppression** | A finding is only dismissed if *every* path is safe. Branches, loops (`break`/`continue`), `try`/`except`/`finally`, aliasing and mutation of lists/dicts, closures and `:=` are modeled. A differential fuzzer executes thousands of random programs to check that no dismissed sink ever receives attacker input. |
 | **Across functions and files** | A sink fed by a function parameter is confirmed when a caller anywhere in the scanned code passes untrusted data (directly or through other functions), or when a called function returns it; the trace names the source file and line. |
 | **Framework-aware** | Sources: Flask `request.*`, Django/DRF/Starlette/FastAPI request objects (incl. `self.request`), route-handler parameters, `input()`, `sys.argv`. |
 | **One report from many tools** | Imports Semgrep, Bandit, CodeQL (SARIF) and Gitleaks; deduplicates by vulnerability class and location, keeping every tool as provenance. |
 | **Fixes you can apply** | Mechanical, validated fix suggestions: parameterized queries (driver-aware placeholders), argument lists instead of shell strings, `ast.literal_eval`, SHA-256. Each is an exact edit that re-parses; ambiguous cases get no fix rather than a wrong one. |
-| **Optional local-LLM triage** | `--llm` asks a local Ollama model about remaining candidates. It can confirm, but may only suppress by citing a line that HackScan verifies itself (an allow-list guard, constant or sanitizer that holds on every path). Code is treated as untrusted data; secrets are redacted. |
+| **Optional local-LLM triage** | `--llm` asks a local Ollama model about remaining candidates. Its assessment is attached to the finding (it never confirms one), and it may only suppress by citing a line that HackScan verifies itself (an allow-list guard, constant or sanitizer that holds on every path). Code is treated as untrusted data; secrets are redacted. |
 | **CI-ready** | SARIF 2.1.0 (validated against the OASIS schema) for GitHub code scanning, `--fail-on` exit codes, stable fingerprints that survive code moves. |
 
 ## Install
@@ -61,7 +62,7 @@ hackscan rules                                    # list rules
 | `--no-taint` | Pattern matching only. |
 | `--show-fixes` / `--no-fix` | Print suggested fixes as diffs / do not generate fixes (fixes are also in JSON and SARIF `fixes`). |
 | `--llm`, `--model`, `--ollama-host` | Opt-in LLM triage of candidates via Ollama (default `http://localhost:11434`). |
-| `--llm-max`, `--llm-timeout`, `--llm-no-suppress` | LLM budget (default 20 findings, 60 s/request); let the LLM confirm/annotate but never suppress. |
+| `--llm-max`, `--llm-timeout`, `--llm-no-suppress` | LLM budget (default 20 findings, 60 s/request); let the LLM annotate (it never confirms) but never suppress. |
 | `--color auto\|always\|never` | Rich terminal output; `auto` uses it only on an interactive terminal (not in CI, pipes or with `NO_COLOR`). |
 | `--jobs N` | Worker processes (default: automatic). |
 
@@ -94,8 +95,9 @@ llm-model: qwen2.5-coder:7b
 `--llm` sends each remaining *candidate* (never confirmed or suppressed findings) with
 its surrounding function to a local Ollama model and asks for a verdict:
 
-- **true positive**: the finding becomes *confirmed* (+15 confidence); a suggested fix is
-  kept only if the patched file parses and a re-scan shows the finding gone and nothing new.
+- **true positive**: the finding stays a *candidate* with the model's assessment attached
+  (+15 score); only HackScan's own analysis confirms. A suggested fix is kept only if the
+  patched file parses and a re-scan shows the finding gone and nothing new.
 - **false positive**: only accepted if the model cites a line that HackScan verifies runs
   on every path and makes the value safe: an allow-list guard (`if x not in {...}: return`,
   `if not x.isdigit(): raise`, or `if not x.isdecimal(): raise`), a constant, or a
@@ -137,8 +139,8 @@ the `p/python` ruleset; CodeQL: `python-security-extended`; HackScan: no options
 
 | Tool | Version | TP | FP | FN | Precision | Recall | F1 |
 |---|---|---:|---:|---:|---:|---:|---:|
-| HackScan | 0.3.0 | 23 | 7 | 3 | 77% | 88% | 82% |
-| HackScan (confirmed only) | 0.3.0 | 18 | 2 | 8 | 90% | 69% | 78% |
+| HackScan | 0.3.2 | 23 | 7 | 3 | 77% | 88% | 82% |
+| HackScan (confirmed only) | 0.3.2 | 17 | 3 | 9 | 85% | 65% | 74% |
 | Bandit | bandit[sarif]==1.9.4 | 24 | 19 | 2 | 56% | 92% | 70% |
 | Semgrep CE | semgrep==1.180.0 (p/python sha256:31c1dfa46e8d) | 16 | 6 | 10 | 73% | 62% | 67% |
 | CodeQL | CodeQL 2.27.2 (codeql/python-queries@1.8.12, security-extended) | 20 | 1 | 6 | 95% | 77% | 85% |
@@ -262,6 +264,77 @@ The hook runs `hackscan scan . --fail-on high` once per commit that touches Pyth
 scans the whole repository (the CLI takes a single path), so `.hackscan.yml` `ignore` globs
 apply as usual.
 
+## Meaning of confirmation
+
+Every JSON and SARIF report names this contract (`hackscan-confirmation-v1`): JSON as
+`tool.confirmation_contract` and a `confirmation_basis` per finding (`modelled-flow` for a
+confirmed finding, `assumed-flow` for a candidate whose possible flow is assumed), SARIF as
+the `confirmationBasis` / `confirmationContract` properties and the verdict sentence in the
+result message. The bracketed number in text output is a heuristic ranking score (0-100),
+not a probability or a measure of exploitability.
+
+**What `confirmed` means.** For injection findings, `confirmed` means HackScan establishes
+an abstract source-to-sink dependency using its supported operation models and function
+links, with no unresolved assumed-flow step on the supporting dependency. The dependency
+must survive the sink-specific sanitizer and quoting checks. Confirmation is evidence
+within this static model. It does not prove that an execution reaches the sink, that the
+call succeeds, that attacker-controlled characters survive unchanged, or that an injection
+vulnerability is exploitable. A candidate, or the absence of a confirmation, is not
+evidence of safety.
+
+**Library, builtin and source assumptions.** Recognized sources are treated as untrusted
+according to the active source definitions and source-recognition heuristics; HackScan
+assumes those APIs have their expected behaviour and does not establish their runtime
+implementation or deployment configuration. Library and builtin models apply to the
+documented call forms and argument roles. An explicit callback or custom implementation
+that can replace the result (`json.loads(s, cls=...)`, a function as `re.sub`'s
+replacement) is outside the default data-preservation model. Unmodelled calls, unsupported
+object flows and unresolved aliases contribute assumed flow and cannot alone establish a
+confirmation.
+
+**Replacement detection.** A library model, a linked function or a binding that scanned code
+may replace contributes assumed flow. Detection covers only these syntactic forms; detected
+facts apply across all analyzed files, regardless of execution order:
+
+| Form | Example | Treated as replaced |
+|---|---|---|
+| Attribute assignment or deletion (except on a method's own `self`/`cls`) | `json.loads = f`, `helpers.ident = f` | that name, in any module |
+| `setattr`/`delattr` with a constant name (any spelling or alias) | `setattr(m, "ident", f)` | that name |
+| A module object used other than to read or call one of its attributes | `m = json`, `f(json)`, `vars(json)`, `json.__dict__[k] = v`, `setattr(json, name, f)` | every name of that module |
+| `sys.modules` written, or used other than for lookups and membership | `sys.modules[name] = m`, `mods = sys.modules`, `sys.modules.copy()` | that module, or any module |
+| A module of computed name written directly | `import_module(n).__dict__[k] = v`, `setattr(import_module(n), k, v)` | any module |
+| This module's `globals()`/`vars()`/`locals()` used other than for lookups and membership | `globals()[k] = v`, `globals().copy()`, `f(globals())` | this module's names and every module it imports |
+| A write, import or namespace helper used as a value | `ops = [setattr]` | any module (a getter: this module and its imports) |
+| A behaviour attribute stored, or set by constant name | `ident.__code__ = g.__code__` (`__defaults__`, `__kwdefaults__`, `__dict__`, `__class__`, `__call__`) | that function (an object of unknown origin: any) |
+| A function's `__globals__` written | `ident.__globals__[k] = v` | the module defining it (through re-exports) |
+| A scanned module imported instead of a library module | `json.py` at a source root | that library's models |
+| A caller's own binding set from outside | `app.json = ...`, `app.__dict__["go"] = ...` | models and links reached through that name in `app` |
+
+Computed imports keep a boundary: computing or performing an import alone does not
+invalidate every model; a recognized write or escape of the returned module does. Not
+detected (replacement through these may be missed): a module of computed name handed to
+other code that writes it; behaviour changes through an alias (`alias = ident;
+alias.__code__ = ...`) or a re-exported spelling (`bridge.parse.__code__ = ...`);
+`fn.__setattr__(...)`, `object.__setattr__(fn, ...)`, a computed-name `setattr` on a
+function, changes to the contents of `__kwdefaults__`; a function handed to other code
+(`patch(json.loads)`); bound readers or views of a namespace (`lookup = globals().get`,
+`globals().keys().mapping`); comparisons with a namespace (`globals() == x`); replacing a
+library model's internals (`json.JSONDecoder.decode = ...`); and any code outside the
+analyzed files.
+
+**Static approximations.** Containers and aliases are summarized and can merge data from
+different elements or states. Attribute and expression handling can retain dependencies
+from metadata, discarded operands, or values that are not ultimately selected (`[q, "x"][1]`,
+`q[:0]`). Destructive container operations may leave earlier dependencies in the summary.
+HackScan does not establish exact runtime behaviour for short-circuiting, dead code,
+assignment-expression evaluation order, asynchronous execution, or `finally` interactions;
+call signatures and successful execution are not generally validated. These approximations
+can produce a confirmed abstract dependency where no runtime source-to-sink flow occurs.
+Sanitizer credit can also be retained across supported identity operations or function
+boundaries in ways that miss a confirmation. The report identifies the active knowledge
+configuration; interpret a confirmation using this contract and the model coverage of that
+scan.
+
 ## Limitations
 
 - Taint analysis follows calls across functions and files only to *confirm* findings: a
@@ -271,9 +344,9 @@ apply as usual.
   once are linked (same module, `import`/`from ... import`, relative imports and
   re-exports); methods, nested functions, decorated functions, modules with a star
   import, `*args`/`**kwargs` call sites and module names that match more than one file
-  are not followed. Sources are not tracked through object attributes or globals. The
-  result of a call is assumed to carry its arguments, so a helper that sanitizes them
-  (`def clean(x): return int(x)`) does not prevent a confirmation.
+  are not followed. Sources are not tracked through object attributes or globals. Through
+  a call HackScan neither models nor links, the flow is *assumed*: the finding stays a
+  candidate and the call is named in its evidence.
 - Findings in a function (or module) that itself uses `:=` are never suppressed, only
   confirmed or left as candidates: an assignment expression can rebind a name in the
   middle of an expression, which the statement-level analysis does not order. Sinks in

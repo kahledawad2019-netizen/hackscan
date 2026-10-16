@@ -150,8 +150,9 @@ def test_sanitizer_applies_only_to_its_class():
             eval(shlex.quote(input()))
         """
         )[0]
-        is Status.CONFIRMED
-    )  # shell quoting does not make code safe to eval
+        is not Status.SUPPRESSED
+    )  # shell quoting does not make code safe to eval (an `eval` in the file may rebind
+    # `shlex.quote`, so the call is not modelled there: a candidate, never suppressed)
 
 
 def test_sanitized_mixed_with_tainted_is_not_sanitized():
@@ -176,14 +177,17 @@ def test_numeric_cast_sanitizes_everything():
 
 
 def test_unknown_call_propagates_taint_but_is_not_constant():
-    assert (
-        verdict(
-            """
+    # Through a call nobody models the flow is possible but not established: a candidate
+    # (never suppressed), with the unmodelled call recorded.
+    (f,) = scan(
+        """
         def f():
             os.system(build(input()))
         """
-        )[0]
-        is Status.CONFIRMED
+    )
+    assert f.status is Status.CANDIDATE
+    assert any(
+        "only through `build`" in e.message and "not modelled" in e.message for e in f.evidence
     )
     assert verdict(
         """

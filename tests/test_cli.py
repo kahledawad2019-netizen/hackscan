@@ -169,7 +169,7 @@ def test_single_file_target(tmp_path: Path):
 
 def test_quiet_and_rules_command():
     quiet = run("scan", str(FRAMEWORKS), "-q")
-    assert "Summary" not in quiet.output and "HackScan" not in quiet.output
+    assert "Summary" not in quiet.output and not quiet.output.startswith("HackScan")
     assert "HS-SQLI-001" in run("rules").output
 
 

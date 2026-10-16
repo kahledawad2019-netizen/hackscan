@@ -78,7 +78,7 @@ def _finding_panel(f: Finding, show_fixes: bool, diff_for) -> Panel:
         (f.status.value, STATUS_STYLE[f.status]),
         "  ",
         (f.rule_id, "bold"),
-        ("  " + f"{f.confidence}%", "dim"),
+        ("  " + f"score {f.confidence}", "dim"),
     )
     location = _safe(f"{f.location.path}:{f.location.start_line}:{f.location.start_column}")
     body: list = [Text(location, style=f"bold {ACCENT}"), Text(_safe(f.message))]

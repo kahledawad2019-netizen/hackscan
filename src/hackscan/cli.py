@@ -19,7 +19,14 @@ import click
 
 from hackscan import __version__
 from hackscan.config import ConfigError, HackScanConfig, load, parse_import_format, parse_tools
-from hackscan.core.models import OWN_SOURCE, Finding, Severity, Status
+from hackscan.core.models import (
+    CONFIRMATION_CONTRACT,
+    OWN_SOURCE,
+    Finding,
+    Severity,
+    Status,
+    confirmation_basis,
+)
 from hackscan.core.pipeline import ScanResult, scan
 from hackscan.core.redact import redact_secretish, strip_controls
 from hackscan.plugins.loader import PluginError, resolve_plugins
@@ -91,7 +98,7 @@ def main() -> None:
     "--llm-no-suppress",
     is_flag=True,
     default=False,
-    help="Let the LLM confirm and annotate, but never suppress.",
+    help="Let the LLM annotate (it never confirms), but never suppress.",
 )
 @click.option("--show-fixes", is_flag=True, default=False, help="Print suggested fixes as diffs.")
 @click.option("--jobs", type=click.IntRange(0), help="Worker processes (0 = automatic).")
@@ -367,6 +374,7 @@ def _json(result: ScanResult, findings: list[Finding]) -> dict:
         "tool": {
             "name": "hackscan",
             "version": __version__,
+            "confirmation_contract": CONFIRMATION_CONTRACT,
             "knowledge": {
                 "version": result.knowledge_version,
                 "sha256": result.knowledge_sha256,
@@ -380,7 +388,9 @@ def _json(result: ScanResult, findings: list[Finding]) -> dict:
             "findings": len(findings),
             "by_status": {s.value: sum(f.status is s for f in findings) for s in Status},
         },
-        "findings": [f.to_dict() for f in findings],
+        "findings": [
+            {**f.to_dict(), "confirmation_basis": confirmation_basis(f)} for f in findings
+        ],
         "errors": result.errors,
         "warnings": result.warnings,
         "tool_runs": [vars(r) for r in result.tool_runs],
@@ -403,8 +413,13 @@ def _text(
         lines.append("")
     ordered = sorted(
         findings,
-        key=lambda f: (-f.severity.rank, f.status is not Status.CONFIRMED, -f.confidence,
-                       *f.location.sort_key(), f.id),
+        key=lambda f: (
+            -f.severity.rank,
+            f.status is not Status.CONFIRMED,
+            -f.confidence,
+            *f.location.sort_key(),
+            f.id,
+        ),
     )
     for f in ordered:
         loc = f"{f.location.path}:{f.location.start_line}:{f.location.start_column}"
@@ -412,7 +427,7 @@ def _text(
         if f.status is Status.SUPPRESSED:
             status = f"suppressed ({f.suppression})"
         lines.append(
-            f"{f.severity.value.upper():<8} {status:<10} {loc}  {f.rule_id}  [{f.confidence}%]"
+            f"{f.severity.value.upper():<8} {status:<10} {loc}  {f.rule_id}  [score {f.confidence}]"
         )
         lines.append(f"    {f.message}")
         if f.snippet:

@@ -1,11 +1,11 @@
 {
-  "generated": "2026-10-09",
+  "generated": "2026-10-16",
   "vulnerable": 26,
   "safe": 24,
   "files": 9,
   "tools": {
     "HackScan": {
-      "version": "0.3.0",
+      "version": "0.3.2",
       "skipped": null,
       "scores": {
         "sqli": {
@@ -41,7 +41,7 @@
       }
     },
     "HackScan (confirmed only)": {
-      "version": "0.3.0",
+      "version": "0.3.2",
       "skipped": null,
       "scores": {
         "sqli": {
@@ -52,14 +52,14 @@
         },
         "cmdi": {
           "tp": 5,
-          "fp": 1,
+          "fp": 2,
           "fn": 1,
-          "trap_hits": 1
+          "trap_hits": 2
         },
         "codei": {
-          "tp": 6,
+          "tp": 5,
           "fp": 0,
-          "fn": 0,
+          "fn": 1,
           "trap_hits": 0
         },
         "weak_crypto": {
@@ -69,10 +69,10 @@
           "trap_hits": 0
         },
         "all": {
-          "tp": 18,
-          "fp": 2,
-          "fn": 8,
-          "trap_hits": 2
+          "tp": 17,
+          "fp": 3,
+          "fn": 9,
+          "trap_hits": 3
         }
       }
     },
