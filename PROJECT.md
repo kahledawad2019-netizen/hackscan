@@ -542,7 +542,7 @@ hackscan/
   cursor scope; psycopg 3: algorithm=b'scram-sha-256'). LLM prompt version 4 forbids fast-digest
   fixes for credentials. Found by Codex in the creative-plan review; Codex review 3 rounds, "Step OK".
   Benchmarks unchanged.
-- 2026-10-19 (unreleased): SQLAlchemy `text()` import paths. `sqlalchemy.sql.expression.text` (the same
+- 2026-10-19 (v0.4.3): SQLAlchemy `text()` import paths. `sqlalchemy.sql.expression.text` (the same
   function as `sqlalchemy.text`) was not a SQL function, so a
   `text(sort + ' ' + order)` passed to `order_by()` produced no finding: the security agent's exam missed
   both vulnerable calibre-web sites this way. Both are now found and confirmed at the labelled
