@@ -356,6 +356,11 @@ scan.
   Module-level constants are trusted only when bound exactly once and the module never
   writes its namespace dynamically (`globals()`, `vars()`, `exec`, `eval`, `__dict__`,
   star imports); `global`/`nonlocal` names are never trusted.
+- SQLAlchemy `text()` is a sink under each of its import paths (`sqlalchemy`, `sqlalchemy.sql`,
+  `sqlalchemy.sql.expression`), with its SQL given positionally or as `text=`, wherever its clause is used (`execute`,
+  `order_by`, `filter`, ...). `execute(text(...))` is reported once, at the `text()` call; a `text()`
+  clause stored in a variable and executed later is reported at both calls, since the execute side
+  does not prove what the variable holds.
 - Mutable objects (lists, dicts, sets) are tracked by variable name. Mutation through
   direct aliases, method calls (`d.get(k).append(x)`), bound methods
   (`add = parts.append`), conditional receivers and comprehension items is modeled. A

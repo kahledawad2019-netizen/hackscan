@@ -22,15 +22,23 @@ from hackscan.plugins.base import (
     has_sql_text,
     is_constant,
     is_string_formatting,
+    keyword,
 )
 
 # Method names that execute raw SQL on DB-API cursors/connections, Django and pandas.
 SQL_METHODS = frozenset(
     {"execute", "executemany", "executescript", "raw", "read_sql", "read_sql_query"}
 )
-# Fully-qualified functions that take raw SQL text.
+# Fully-qualified functions that take raw SQL text. SQLAlchemy exports one text() under
+# several import paths; text() is a sink wherever its clause goes (execute, order_by, ...).
 SQL_FUNCTIONS = frozenset(
-    {"sqlalchemy.text", "sqlalchemy.sql.text", "pandas.read_sql", "pandas.read_sql_query"}
+    {
+        "sqlalchemy.text",
+        "sqlalchemy.sql.text",
+        "sqlalchemy.sql.expression.text",
+        "pandas.read_sql",
+        "pandas.read_sql_query",
+    }
 )
 DB_MODULES = (
     "sqlite3",
@@ -66,10 +74,14 @@ class SqlInjection(RulePlugin):
         method = isinstance(node.func, ast.Attribute) and node.func.attr in SQL_METHODS
         if not (strong or method):
             return
-        query = first_arg(node, "sql") or first_arg(node, "query")
+        query = _query(node, strong)
         if query is None or is_constant(query):
             return
-        if isinstance(query, ast.Call) and ctx.call_names(query) & SQL_FUNCTIONS:
+        if (
+            isinstance(query, ast.Call)
+            and ctx.call_names(query) & SQL_FUNCTIONS
+            and _query(query, True) is not None
+        ):
             return  # e.g. session.execute(text(...)): reported at the inner text() call
         db_receiver = strong or _is_db_receiver(node.func, ctx)
 
@@ -86,6 +98,15 @@ class SqlInjection(RulePlugin):
                 confidence=40,
                 arg=query,
             )
+
+
+def _query(call: ast.Call, strong: bool) -> ast.expr | None:
+    """The SQL argument: positional 0, else `sql=` or `query=`, and for SQL functions also `text=`
+    (sqlalchemy's text(text=...)). None when it cannot be read (unpacked arguments)."""
+    query = first_arg(call, "sql") or first_arg(call, "query")
+    if query is None and strong:
+        query = keyword(call, "text")
+    return query
 
 
 def _is_db_receiver(func: ast.expr, ctx: FileContext) -> bool:
