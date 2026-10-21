@@ -139,8 +139,8 @@ the `p/python` ruleset; CodeQL: `python-security-extended`; HackScan: no options
 
 | Tool | Version | TP | FP | FN | Precision | Recall | F1 |
 |---|---|---:|---:|---:|---:|---:|---:|
-| HackScan | 0.4.0 | 23 | 7 | 3 | 77% | 88% | 82% |
-| HackScan (confirmed only) | 0.4.0 | 17 | 3 | 9 | 85% | 65% | 74% |
+| HackScan | 0.5.0.dev0 | 26 | 7 | 0 | 79% | 100% | 88% |
+| HackScan (confirmed only) | 0.5.0.dev0 | 17 | 3 | 9 | 85% | 65% | 74% |
 | Bandit | bandit[sarif]==1.9.4 | 24 | 19 | 2 | 56% | 92% | 70% |
 | Semgrep CE | semgrep==1.180.0 (p/python sha256:31c1dfa46e8d) | 16 | 6 | 10 | 73% | 62% | 67% |
 | CodeQL | CodeQL 2.27.2 (codeql/python-queries@1.8.12, security-extended) | 20 | 1 | 6 | 95% | 77% | 85% |
@@ -175,6 +175,7 @@ HackScan's authors, so treat both tables as a sanity check rather than a ranking
 | `HS-CMDI-001` | Non-constant commands reaching `os.system`, `os.popen`, `subprocess.*(shell=True)`, ... | high |
 | `HS-CODEI-001` | Non-constant input to `eval`, `exec`, `compile` | high |
 | `HS-CRYPTO-001` | MD5/SHA-1 (unless `usedforsecurity=False`); PostgreSQL MD5 authentication verifiers | low; high on credential data (CWE-916) and for the verifiers |
+| `HS-CRYPTO-002` | Broken or legacy ciphers (DES, 3DES, RC2, RC4, Blowfish, CAST, IDEA, SEED, XOR) through PyCryptodome/PyCrypto, `cryptography` or pyDes, and ECB mode (CWE-327) | medium |
 
 Sanitizers recognized: numeric/UUID conversions (all classes), `psycopg` `sql.Identifier`
 /`sql.Literal` (SQL). `shlex.quote` is POSIX-only, so quoted commands are kept as
@@ -392,6 +393,11 @@ scan.
   can form a `--` comment), a fragment repeated a runtime number of times (`"-" * int(x)`),
   or a separator repeated between a runtime number of items. Bound query parameters avoid
   all of these.
+- `HS-CRYPTO-002` reports broken or legacy algorithms and ECB mode only. Unauthenticated modes (CBC,
+  CTR, CFB) are not reported, since whether a MAC is applied elsewhere is not visible at the call;
+  neither are a mode given as a number or through a variable, nor PyCrypto's default mode when none
+  is given. These findings get no automatic fix: replacing a cipher changes the format of stored or
+  exchanged data.
 - Python only. Imported tools may cover other languages; their findings are passed through.
 - Fix suggestions are deliberately conservative: many vulnerable lines get none. Command
   fixes (argument lists) are only offered for programs whose arguments are inert data

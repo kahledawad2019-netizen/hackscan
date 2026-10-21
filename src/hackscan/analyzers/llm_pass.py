@@ -46,6 +46,8 @@ from hackscan.core.models import Evidence, Finding, Fix, FixEdit, Status
 from hackscan.core.redact import redact_secretish
 from hackscan.importers.common import SourceIndex
 from hackscan.plugins.base import FileContext
+from hackscan.plugins.rules.weak_cipher import WeakCipher, weak_cipher_call
+from hackscan.plugins.rules.weak_crypto import WEAK_CONSTRUCTORS
 
 PRODUCER = "llm"
 PROMPT_VERSION = "4"
@@ -376,6 +378,8 @@ def verify_evidence(ctx: FileContext, finding: Finding, line: int, kind: str) ->
     call = _call_at(ctx, finding.location)
     if call is None or not 0 < line < finding.location.start_line:
         return False
+    if _cipher_finding(finding, call, ctx):
+        return False  # a weak cipher is weak whatever its key or data
     func = ctx.enclosing_function(call)
     if func is None or isinstance(func, ast.Lambda):
         return False
@@ -604,6 +608,32 @@ def _exits(body: list[ast.stmt]) -> bool:
     return bool(body) and isinstance(body[-1], (ast.Return, ast.Raise))
 
 
+def _hash_call(call: ast.Call, ctx: FileContext) -> bool:
+    """Whether `call` is certainly a hashlib hash constructor, the only weak_crypto call an LLM
+    rewrite may replace (with a stronger hashlib digest): called as `<name>.<constructor>(...)`
+    where `<name>` can only denote a direct `import hashlib` (no other binding, the template's
+    rule), every name it may resolve to is a hash constructor, and it is not a weak cipher under
+    any resolution. A bare name (`md5(...)` from a from-import) gets no LLM rewrite: a local
+    reassignment of it is not visible in the resolved names."""
+    func = call.func
+    if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)):
+        return False
+    if not ctx.scopes.safe_module_reference(func.value.id, "hashlib", call):
+        return False
+    names = ctx.call_names(call)
+    hashes = WEAK_CONSTRUCTORS.keys() | {"hashlib.new"}
+    return bool(names) and names <= hashes and weak_cipher_call(call, ctx) is None
+
+
+def _cipher_finding(finding: Finding, call: ast.Call | None, ctx: FileContext) -> bool:
+    """A weak-cipher finding (its own rule, a merged one, or a call the cipher rule matches):
+    about the algorithm, so no statement about its input can make it safe."""
+    rules = {finding.rule_id, *finding.related_rules}
+    return WeakCipher.rule_id in rules or (
+        call is not None and weak_cipher_call(call, ctx) is not None
+    )
+
+
 def _llm_fix(finding: Finding, replacement: str, ctx: FileContext, rescan) -> Fix | None:
     try:
         expr = ast.parse(replacement.strip(), mode="eval").body
@@ -614,6 +644,10 @@ def _llm_fix(finding: Finding, replacement: str, ctx: FileContext, rescan) -> Fi
     call = _call_at(ctx, finding.location)
     if call is None or ctx.has_secret_literal(call):
         return None  # a fix carries the call's real code, secrets included
+    if finding.vuln_class == "weak_crypto" and (
+        not _hash_call(call, ctx) or _cipher_finding(finding, call, ctx)
+    ):
+        return None  # a weak cipher (or anything not a hashlib hash): no digest swap
     if finding.vuln_class == "weak_crypto" and credential_fix_refused(finding, call, ctx):
         return None  # credential data: no fast digest, whatever the model proposes
     if not ctx.scopes.safe_introduced_names(call, expr, sql_receiver=finding.vuln_class == "sqli"):

@@ -553,3 +553,20 @@ hackscan/
   reported at its `execute`. Not done: skipping the `execute` of a variable bound to `text()`; binding
   values are flow-insensitive and meant for finding candidates, so they cannot prove what the variable
   holds.
+- 2026-10-21 (unreleased, 0.5.0.dev0): weak ciphers, rule `HS-CRYPTO-002` (CWE-327, medium). Broken or legacy
+  algorithms through PyCryptodome/PyCrypto (`Crypto.Cipher`/`Cryptodome.Cipher` DES, DES3, ARC2, ARC4,
+  Blowfish, CAST, XOR), `cryptography` (`algorithms`/decrepit TripleDES, Blowfish, ARC4, CAST5, IDEA, SEED)
+  and pyDes; ECB mode through `new(key, MODE_ECB)` and `modes.ECB()`. One finding per call (the algorithm
+  first). The class stays `weak_crypto`, so the LLM fix path now refuses any rewrite of a call that is not a
+  hashlib hash: without that, a model reply swapping a cipher for `hashlib.sha256(...)` with the same
+  arguments passed validation (regression tests fail without the guard). Not covered: unauthenticated
+  modes (a MAC elsewhere is not visible at the call), numeric or variable modes, PyCrypto's default mode.
+  Benchmark suite: weak_crypto 3/0/3 -> 6/0/0 (TP/FP/FN); overall 23/7/3 -> 26/7/0, F1 82% -> 88%. The 19
+  development and validation checkouts: no finding changes. Codex hs-cipher r1 (3 findings, fixed): the mode
+  is resolved through the file's imports (an aliased MODE_ECB counts, a local variable does not); LLM triage
+  never suppresses a cipher finding through evidence about its input (a constant key or a guard does not
+  make RC4 safe); an LLM rewrite of a weak_crypto call needs every possible resolution of the callee to be a
+  hashlib hash and no cipher rule on the finding (conditional imports, merged findings). r2: it also needs
+  the call written as `<name>.<constructor>(...)` on a name that can only be `import hashlib` (the template's
+  rule), since resolved names miss local or `global` reassignments; a bare `md5(...)` gets no LLM rewrite.
+  Mutations 14/14 (one equivalent noted).

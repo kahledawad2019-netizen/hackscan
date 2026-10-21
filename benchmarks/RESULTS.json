@@ -1,11 +1,11 @@
 {
-  "generated": "2026-10-16",
+  "generated": "2026-10-21",
   "vulnerable": 26,
   "safe": 24,
   "files": 9,
   "tools": {
     "HackScan": {
-      "version": "0.4.0",
+      "version": "0.5.0.dev0",
       "skipped": null,
       "scores": {
         "sqli": {
@@ -27,21 +27,21 @@
           "trap_hits": 1
         },
         "weak_crypto": {
-          "tp": 3,
+          "tp": 6,
           "fp": 0,
-          "fn": 3,
+          "fn": 0,
           "trap_hits": 0
         },
         "all": {
-          "tp": 23,
+          "tp": 26,
           "fp": 7,
-          "fn": 3,
+          "fn": 0,
           "trap_hits": 7
         }
       }
     },
     "HackScan (confirmed only)": {
-      "version": "0.4.0",
+      "version": "0.5.0.dev0",
       "skipped": null,
       "scores": {
         "sqli": {

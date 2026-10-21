@@ -18,6 +18,7 @@ from hackscan.plugins.base import RulePlugin
 from hackscan.plugins.rules.cmdi import CommandInjection
 from hackscan.plugins.rules.codei import CodeInjection
 from hackscan.plugins.rules.sqli import SqlInjection
+from hackscan.plugins.rules.weak_cipher import WeakCipher
 from hackscan.plugins.rules.weak_crypto import WeakHash
 
 BUILTIN_RULES: tuple[type[RulePlugin], ...] = (
@@ -25,6 +26,7 @@ BUILTIN_RULES: tuple[type[RulePlugin], ...] = (
     CommandInjection,
     CodeInjection,
     WeakHash,
+    WeakCipher,
 )
 
 

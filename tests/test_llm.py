@@ -683,6 +683,93 @@ def test_llm_never_swaps_a_fast_digest_into_credential_hashing(tmp_path, code, f
     assert f.fix is None
 
 
+@pytest.mark.parametrize(
+    ("cipher", "fixed"),
+    [
+        ("DES.new(key, DES.MODE_ECB)", "hashlib.sha256(key, DES.MODE_ECB)"),
+        ("AES.new(key, AES.MODE_ECB)", "hashlib.sha256(key, AES.MODE_ECB)"),
+    ],
+    ids=["broken cipher", "ECB mode"],
+)
+def test_llm_never_replaces_a_weak_cipher_with_a_digest(tmp_path, cipher, fixed):
+    # HS-CRYPTO-002 shares the weak_crypto class with weak hashes; a digest is no cipher fix.
+    code = (
+        "import hashlib\nfrom Crypto.Cipher import AES, DES\n\n"
+        f"def run(key):\n    return {cipher}\n"
+    )
+    (f,) = run(tmp_path, code, FakeOllama(answer("true_positive", fixed=fixed))).findings
+    assert f.rule_id == "HS-CRYPTO-002" and f.fix is None
+
+
+@pytest.mark.parametrize(
+    ("body", "line", "kind"),
+    [
+        ('    key = b"1234567890abcdef"\n', 4, "constant"),
+        ("    if not key.isdigit():\n        return None\n", 4, "guard"),
+    ],
+    ids=["constant key", "guard on the key"],
+)
+def test_llm_never_suppresses_a_weak_cipher_through_its_input(tmp_path, body, line, kind):
+    # A broken cipher is weak whatever its key: input evidence cannot make it safe.
+    code = f"from Crypto.Cipher import ARC4\n\ndef run(key):\n{body}    return ARC4.new(key)\n"
+    report = run(tmp_path, code, FakeOllama(answer("false_positive", line=line, kind=kind)))
+    (f,) = report.findings
+    assert f.rule_id == "HS-CRYPTO-002" and f.status is not Status.SUPPRESSED
+
+
+def test_llm_refuses_digest_fix_when_the_constructor_may_be_a_cipher(tmp_path):
+    # A conditional import makes `make` either RC4 or MD5: the call is not certainly a hash.
+    code = (
+        "import hashlib\n"
+        "try:\n    from Crypto.Cipher.ARC4 import new as make\n"
+        "except ImportError:\n    from hashlib import md5 as make\n\n"
+        "def run(key):\n    return make(key)\n"
+    )
+    report = run(tmp_path, code, FakeOllama(answer("true_positive", fixed="hashlib.sha256(key)")))
+    assert report.findings and all(f.fix is None for f in report.findings)
+    assert any("HS-CRYPTO-002" in {f.rule_id, *f.related_rules} for f in report.findings), [
+        (f.rule_id, f.related_rules) for f in report.findings
+    ]
+
+
+def test_llm_refuses_digest_fix_when_the_constructor_may_be_something_else(tmp_path):
+    # `make` is MD5 or an unknown library function: a rewrite needs every resolution to be a hash.
+    code = (
+        "import hashlib\n"
+        "try:\n    from mylib import digest as make\n"
+        "except ImportError:\n    from hashlib import md5 as make\n\n"
+        "def run(data):\n    return make(data)\n"
+    )
+    report = run(tmp_path, code, FakeOllama(answer("true_positive", fixed="hashlib.sha256(data)")))
+    (f,) = report.findings
+    assert f.rule_id == "HS-CRYPTO-001" and f.fix is None
+
+
+def test_llm_refuses_digest_fix_when_a_local_binding_may_replace_the_hash(tmp_path):
+    # Resolved names do not see `make = ARC4.new`: a rewrite needs `hashlib.<constructor>(...)`
+    # on a name that can only be the hashlib module.
+    code = (
+        "import hashlib\nfrom Crypto.Cipher import ARC4\n\n"
+        "def run(key, legacy):\n    from hashlib import md5 as make\n"
+        "    if legacy:\n        make = ARC4.new\n    return make(key)\n"
+    )
+    report = run(tmp_path, code, FakeOllama(answer("true_positive", fixed="hashlib.sha256(key)")))
+    assert report.findings and all(f.fix is None for f in report.findings)
+
+
+def test_llm_refuses_digest_fix_when_the_hashlib_name_is_rebound(tmp_path):
+    # `global hashlib` reassigned elsewhere: the resolved name still says hashlib.md5, but the
+    # name is not certainly the module.
+    code = (
+        "import hashlib\nimport hashlib as h\nfrom Crypto.Cipher import ARC4\n\n"
+        "def swap():\n    global h\n    h = ARC4\n\n"
+        "def run(key):\n    return h.md5(key)\n"
+    )
+    # the replacement uses the clean `hashlib`; only the callee's own name is rebound
+    report = run(tmp_path, code, FakeOllama(answer("true_positive", fixed="hashlib.sha256(key)")))
+    assert report.findings and all(f.fix is None for f in report.findings)
+
+
 def test_llm_prompt_forbids_fast_digests_for_credentials():
     from hackscan.analyzers import llm_pass
 
