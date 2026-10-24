@@ -1,11 +1,11 @@
 {
-  "generated": "2026-10-21",
+  "generated": "2026-10-24",
   "vulnerable": 26,
   "safe": 24,
   "files": 9,
   "tools": {
     "HackScan": {
-      "version": "0.5.0.dev0",
+      "version": "0.5.0",
       "skipped": null,
       "scores": {
         "sqli": {
@@ -41,7 +41,7 @@
       }
     },
     "HackScan (confirmed only)": {
-      "version": "0.5.0.dev0",
+      "version": "0.5.0",
       "skipped": null,
       "scores": {
         "sqli": {

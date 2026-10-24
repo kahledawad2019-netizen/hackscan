@@ -50,9 +50,11 @@ cryptography. Each sink statement is labeled on its first line:
   mode); `safe` means a strong construction (scrypt, HMAC-SHA256, AES-GCM) or a
   declared non-security use (`usedforsecurity=False`).
 
-It deliberately includes cases HackScan misses (taint stored on `self` and used in
-another method, weak ciphers such as DES/RC4/ECB, `compile()` of user input) and traps
-it cannot prove safe (allow-list guards, constant-only callers, dict lookups).
+It deliberately includes cases HackScan missed when the suite was written (taint stored on
+`self` and used in another method, weak ciphers such as DES/RC4/ECB, `compile()` of user
+input) and traps it cannot prove safe (allow-list guards, constant-only callers, dict
+lookups). Since 0.5.0 the weak ciphers are found (`HS-CRYPTO-002`); RESULTS.md has the
+current per-class counts.
 
 ## Scoring
 

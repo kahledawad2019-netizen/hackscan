@@ -139,8 +139,8 @@ the `p/python` ruleset; CodeQL: `python-security-extended`; HackScan: no options
 
 | Tool | Version | TP | FP | FN | Precision | Recall | F1 |
 |---|---|---:|---:|---:|---:|---:|---:|
-| HackScan | 0.5.0.dev0 | 26 | 7 | 0 | 79% | 100% | 88% |
-| HackScan (confirmed only) | 0.5.0.dev0 | 17 | 3 | 9 | 85% | 65% | 74% |
+| HackScan | 0.5.0 | 26 | 7 | 0 | 79% | 100% | 88% |
+| HackScan (confirmed only) | 0.5.0 | 17 | 3 | 9 | 85% | 65% | 74% |
 | Bandit | bandit[sarif]==1.9.4 | 24 | 19 | 2 | 56% | 92% | 70% |
 | Semgrep CE | semgrep==1.180.0 (p/python sha256:31c1dfa46e8d) | 16 | 6 | 10 | 73% | 62% | 67% |
 | CodeQL | CodeQL 2.27.2 (codeql/python-queries@1.8.12, security-extended) | 20 | 1 | 6 | 95% | 77% | 85% |
@@ -161,9 +161,10 @@ vulnerabilities any tool found ([details](benchmarks/APPS.md)):
 
 CodeQL is the most precise; Bandit finds a little more but about half of its reports are
 noise. HackScan sits in between: higher recall than CodeQL and Semgrep, higher
-precision than Bandit. Its misses are weak ciphers (DES, RC4, ECB, unauthenticated
-modes), which its rule does not cover yet, and flows it does not follow (`self`
-attributes, ambiguous module names). Its false positives are sinks it cannot prove safe (allow-list
+precision than Bandit. In this app measurement (taken before 0.5.0 and not re-run) its
+misses were weak ciphers (DES, RC4, ECB, unauthenticated modes) and flows it does not follow
+(`self` attributes, ambiguous module names). Since 0.5.0, `HS-CRYPTO-002` reports broken
+ciphers and ECB mode; unauthenticated modes are still not covered. Its false positives are sinks it cannot prove safe (allow-list
 guards, functions only called with constants). The suite is small and written by
 HackScan's authors, so treat both tables as a sanity check rather than a ranking.
 
@@ -224,7 +225,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: kahledawad2019-netizen/hackscan@v0.4.3
+      - uses: kahledawad2019-netizen/hackscan@v0.5.0
         with:
           path: src
           fail-on: high
@@ -256,7 +257,7 @@ Python 3.12 on the runner. Without the action:
 ```yaml
 repos:
   - repo: https://github.com/kahledawad2019-netizen/hackscan
-    rev: v0.4.3
+    rev: v0.5.0
     hooks:
       - id: hackscan
 ```

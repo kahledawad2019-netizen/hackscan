@@ -1,11 +1,11 @@
 # Benchmark results
 
-Generated 2026-10-21 by `benchmarks/run.py` on `benchmarks/suite/`: 26 vulnerable sinks and 24 safe traps across 9 files (sqli, cmdi, codei, weak_crypto).
+Generated 2026-10-24 by `benchmarks/run.py` on `benchmarks/suite/`: 26 vulnerable sinks and 24 safe traps across 9 files (sqli, cmdi, codei, weak_crypto).
 
 | Tool | Version | TP | FP | FN | Precision | Recall | F1 |
 |---|---|---:|---:|---:|---:|---:|---:|
-| HackScan | 0.5.0.dev0 | 26 | 7 | 0 | 79% | 100% | 88% |
-| HackScan (confirmed only) | 0.5.0.dev0 | 17 | 3 | 9 | 85% | 65% | 74% |
+| HackScan | 0.5.0 | 26 | 7 | 0 | 79% | 100% | 88% |
+| HackScan (confirmed only) | 0.5.0 | 17 | 3 | 9 | 85% | 65% | 74% |
 | Bandit | bandit[sarif]==1.9.4 | 24 | 19 | 2 | 56% | 92% | 70% |
 | Semgrep CE | semgrep==1.180.0 (p/python sha256:31c1dfa46e8d) | 16 | 6 | 10 | 73% | 62% | 67% |
 | CodeQL | CodeQL 2.27.2 (codeql/python-queries@1.8.12, security-extended) | 20 | 1 | 6 | 95% | 77% | 85% |

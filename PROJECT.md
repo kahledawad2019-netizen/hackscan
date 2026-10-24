@@ -553,7 +553,7 @@ hackscan/
   reported at its `execute`. Not done: skipping the `execute` of a variable bound to `text()`; binding
   values are flow-insensitive and meant for finding candidates, so they cannot prove what the variable
   holds.
-- 2026-10-21 (unreleased, 0.5.0.dev0): weak ciphers, rule `HS-CRYPTO-002` (CWE-327, medium). Broken or legacy
+- 2026-10-21 (v0.5.0): weak ciphers, rule `HS-CRYPTO-002` (CWE-327, medium). Broken or legacy
   algorithms through PyCryptodome/PyCrypto (`Crypto.Cipher`/`Cryptodome.Cipher` DES, DES3, ARC2, ARC4,
   Blowfish, CAST, XOR), `cryptography` (`algorithms`/decrepit TripleDES, Blowfish, ARC4, CAST5, IDEA, SEED)
   and pyDes; ECB mode through `new(key, MODE_ECB)` and `modes.ECB()`. One finding per call (the algorithm
